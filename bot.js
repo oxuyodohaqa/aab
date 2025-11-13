@@ -1028,6 +1028,15 @@ function fetchFromGmail(service = 'paypal', targetEmail = null, fetchType = 'log
     return Promise.resolve(null);
   }
   
+  // Validate targetEmail is provided to prevent cross-user email leakage
+  if (!targetEmail) {
+    console.error('[Gmail] ERROR: targetEmail is required but not provided');
+    console.error(`[Gmail] Service: ${service}, FetchType: ${fetchType}`);
+    return Promise.resolve(null);
+  }
+  
+  console.log(`[Gmail] 🔍 Searching for: ${targetEmail} (${service}/${fetchType})`);
+  
   const startTime = Date.now();
   
   return new Promise((resolve) => {
@@ -1104,8 +1113,11 @@ function fetchFromGmail(service = 'paypal', targetEmail = null, fetchType = 'log
         
         imap.search(searchCriteria, (err, results) => {
           if (err) {
+            console.log(`[Gmail] Search error for ${targetEmail}: ${err.message}`);
             return finish();
           }
+          
+          console.log(`[Gmail] Found ${results ? results.length : 0} emails in INBOX for ${targetEmail}`);
           
           if (!results || results.length === 0) {
             imap.openBox('[Gmail]/Spam', false, (spamErr) => {
@@ -1115,9 +1127,11 @@ function fetchFromGmail(service = 'paypal', targetEmail = null, fetchType = 'log
               
               imap.search(searchCriteria, (spamSearchErr, spamResults) => {
                 if (spamSearchErr || !spamResults || spamResults.length === 0) {
+                  console.log(`[Gmail] No emails found in SPAM for ${targetEmail}`);
                   return finish();
                 }
                 
+                console.log(`[Gmail] Found ${spamResults.length} emails in SPAM for ${targetEmail}`);
                 processEmails(spamResults, 'SPAM');
               });
             });
@@ -1189,12 +1203,14 @@ function fetchFromGmail(service = 'paypal', targetEmail = null, fetchType = 'log
           
           function finishProcessing() {
             if (allEmails.length === 0) {
+              console.log(`[Gmail] No valid emails found for ${targetEmail}`);
               return finish();
             }
             
             allEmails.sort((a, b) => b.date - a.date);
             
             result = allEmails[0];
+            console.log(`[Gmail] ✅ Selected email for ${targetEmail}: From=${result.from}, Subject=${result.subject}, Folder=${result.folder}`);
             finish();
           }
         }
@@ -1772,8 +1788,9 @@ function setupHandlers() {
       let emailText = `${serviceEmoji} ${serviceName} Service\n\n`;
       
       if (service === 'paypal') {
+        emailText += `📧 Enter your PayPal email:\n\n`;
         emailText += `✅ Request OTP from PayPal first\n`;
-        emailText += `✅ Then click button below\n\n`;
+        emailText += `✅ Then enter the email below\n\n`;
         
         const stats = botStats.serviceStats.paypal;
         if (stats.total > 0) {
@@ -1782,17 +1799,18 @@ function setupHandlers() {
           emailText += `📊 Success: ${rate}% | ⏱️ Avg: ${avg}s\n\n`;
         }
         
-        const confirmBtn = await bot.sendMessage(chatId, emailText, { 
+        emailText += `Type your PayPal email below ↓`;
+        
+        const emailPrompt = await bot.sendMessage(chatId, emailText, { 
           reply_markup: {
             inline_keyboard: [
-              [{ text: '🔍 Check PayPal OTP', callback_data: 'fetch_paypal' }],
               [{ text: '❌ Cancel', callback_data: 'cancel' }]
             ]
           }
         });
         
-        userSessions[userId].messagesToDelete.push(confirmBtn.message_id);
-        userSessions[userId].awaitingEmail = false;
+        userSessions[userId].messagesToDelete.push(emailPrompt.message_id);
+        userSessions[userId].awaitingEmail = true;
         
       } else if (service === 'capcut') {
         emailText += `📧 Enter your CapCut email:\n\n`;
@@ -2194,6 +2212,16 @@ const typeBtn = await bot.sendMessage(chatId, emailText, {
     } else if (data === 'fetch_paypal') {
       await deleteMsg(chatId, query.message.message_id);
       
+      // Get email from session (should exist if user came from the email input flow)
+      const email = userSessions[userId]?.email;
+      if (!email) {
+        await bot.sendMessage(chatId, 
+          `❌ No email found\n\nPlease use the service menu to enter your email first.\n\n⚡ Select service below ↓`,
+          getMainKeyboard(userId)
+        );
+        return;
+      }
+      
       const rateCheck = checkRateLimit(userId);
       if (!rateCheck.allowed) {
         let errorMsg = '⚠️ RATE LIMIT\n\nYou\'ve made too many requests.\nPlease wait';
@@ -2211,7 +2239,7 @@ const typeBtn = await bot.sendMessage(chatId, emailText, {
       trackRequest(userId);
       
       const loading = await bot.sendMessage(chatId, 
-        `🔍 Searching PayPal\n\n⏳ Please wait...`,
+        `🔍 Searching PayPal\n📧 ${email}\n\n⏳ Please wait...`,
         { 
           reply_markup: {
             inline_keyboard: [
@@ -2224,7 +2252,7 @@ const typeBtn = await bot.sendMessage(chatId, emailText, {
       const startTime = Date.now();
       
       try {
-        const result = await fetchFromGmail('paypal');
+        const result = await fetchFromGmail('paypal', email);
         
         await deleteMsg(chatId, loading.message_id);
         
@@ -2595,7 +2623,7 @@ if (service === 'spotify') {
           result = await fetchFromTempMail(email);
 
         } else if (service === 'paypal') {
-          result = await fetchFromGmail('paypal');
+          result = await fetchFromGmail('paypal', email);
         }
         
         await deleteMsg(chatId, loading.message_id);
