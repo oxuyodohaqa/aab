@@ -799,6 +799,12 @@ function extractOTP(text = '', html = '', subject = '') {
     .replace(/\s+/g, ' ')
     .trim();
   
+  // Match Spotify format: "529901 – your Spotify login code" or "enter this code 529901"
+  const spotifySubjectMatch = combined.match(/^(\d{6})\s*[–-]\s*your Spotify login code/i);
+  if (spotifySubjectMatch && spotifySubjectMatch[1]) {
+    return spotifySubjectMatch[1];
+  }
+  
   const spotifyMatch = combined.match(/enter this code[^\d]*(\d{6})/i);
   if (spotifyMatch && spotifyMatch[1]) {
     return spotifyMatch[1];
@@ -1061,7 +1067,9 @@ function fetchFromGmail(service = 'paypal', targetEmail = null, fetchType = 'log
         let searchCriteria = [['SINCE', sinceDate]];
         if (targetEmail) {
           searchCriteria.push(['TO', targetEmail]);
-          console.log(`[Gmail] Filtering for: ${targetEmail}`);
+          console.log(`[Gmail] ✓ STRICT FILTERING for recipient: ${targetEmail}`);
+        } else {
+          console.log('[Gmail] ⚠️ WARNING: No email filter applied - may return wrong user\'s email');
         }
         if (service === 'spotify') {
           searchCriteria.push(['OR', ['FROM', 'no-reply@spotify.com'], ['FROM', 'no-reply@alerts.spotify.com']]);
@@ -1071,8 +1079,8 @@ function fetchFromGmail(service = 'paypal', targetEmail = null, fetchType = 'log
             searchCriteria.push(['SUBJECT', 'Reset your password']);
             console.log('[Spotify] Searching for RESET emails');
           } else if (fetchType === 'otp') {
-  searchCriteria.push(['SUBJECT', 'login code']);
-  console.log('[Spotify] Searching for OTP emails (subject contains "login code")');
+  searchCriteria.push(['OR', ['SUBJECT', 'login code'], ['SUBJECT', 'Spotify login code']]);
+  console.log('[Spotify] Searching for OTP emails (subject contains "login code" or "Spotify login code")');
 } else if (fetchType === 'both') {
             console.log('[Spotify] Searching for BOTH (no subject filter)');
           }
