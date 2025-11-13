@@ -1783,7 +1783,7 @@ function setupHandlers() {
       };
       
       const serviceEmoji = serviceEmojis[service];
-      const serviceName = service.charAt(0).toUpperCase() + service.slice(1);
+      const serviceName = service ? service.charAt(0).toUpperCase() + service.slice(1) : 'Unknown';
       
       let emailText = `${serviceEmoji} ${serviceName} Service\n\n`;
       
@@ -2446,6 +2446,18 @@ const typeBtn = await bot.sendMessage(chatId, emailText, {
       const email = text.trim();
       const service = userSessions[userId].service;
       
+      // Validate service exists before proceeding
+      if (!service) {
+        await bot.sendMessage(chatId, 
+          '❌ No service selected\n\nPlease use /start to begin',
+          getMainKeyboard(userId)
+        );
+        return;
+      }
+      
+      // Store email in session for PayPal fetch_paypal handler
+      userSessions[userId].email = email;
+      
       const rateCheck = checkRateLimit(userId);
       if (!rateCheck.allowed) {
         await deleteMsg(chatId, msg.message_id);
@@ -2501,7 +2513,7 @@ if (service === 'spotify') {
       };
       
       const serviceEmoji = serviceEmojis[service];
-      const serviceName = service.charAt(0).toUpperCase() + service.slice(1);
+      const serviceName = service ? service.charAt(0).toUpperCase() + service.slice(1) : 'Unknown';
       
       const loading = await bot.sendMessage(chatId, 
         `🔍 Searching ${serviceName}\n\n⏳ Please wait...`,
