@@ -46,9 +46,6 @@ const countryNames = {
   spain: 'Spain'
 };
 
-// Fixed domains as requested
-const fixedDomains = ['abdcart.shop', 'capcut.pp.ua'];
-
 function fetchWithProxy(url, options = {}, proxyUrl) {
   if (proxyUrl) {
     const agent = new HttpsProxyAgent(proxyUrl);
@@ -66,13 +63,45 @@ function encryptToTargetHex(input) {
   return hexResult;
 }
 
+const fetchCapcutDomains = async (proxy) => {
+  try {
+    const response = await fetchWithProxy('https://generator.email/', {
+      headers: {
+        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
+        'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8,application/signed-exchange;v=b3;q=0.7'
+      }
+    }, proxy);
+
+    if (!response.ok) return [];
+
+    const html = await response.text();
+    const $ = cheerio.load(html);
+    const domains = new Set();
+
+    $('.e7m.tt-suggestions p').each((_, el) => {
+      const dom = $(el).text().trim();
+      if (dom && dom.includes('.')) {
+        domains.add(dom);
+      }
+    });
+
+    return Array.from(domains);
+  } catch (err) {
+    console.error(chalk.red('Error scraping generator.email domains:', err.message));
+    return [];
+  }
+};
+
 const getEmailRandom = async (proxy) => {
   try {
-    // Return the fixed domains instead of fetching from generator.email
-    return fixedDomains;
+    const scrapedDomains = await fetchCapcutDomains(proxy);
+    if (!scrapedDomains || scrapedDomains.length === 0) {
+      throw new Error('No generator.email domains found');
+    }
+    return scrapedDomains;
   } catch (err) {
-    console.error(chalk.red("Error generating email domains:", err.message));
-    return fixedDomains; // Fallback to fixed domains
+    console.error(chalk.red('Error generating email domains:', err.message));
+    return [];
   }
 };
 
@@ -344,7 +373,13 @@ async function promptUser() {
 
     console.log(chalk.green.bold(`\n${getCurrentTime()} Starting with ${countryName} proxy`));
     console.log(chalk.green(`${getCurrentTime()} Creating ${loopCount} account(s)`));
-    console.log(chalk.magenta(`${getCurrentTime()} Using domains: ${fixedDomains.join(', ')}\n`));
+    const availableDomains = await getEmailRandom(selectedProxy);
+    if (!availableDomains || availableDomains.length === 0) {
+      console.log(chalk.red(`${getCurrentTime()} No domains available for signup.`));
+      return;
+    }
+
+    console.log(chalk.magenta(`${getCurrentTime()} Using domains: ${availableDomains.join(', ')}\n`));
 
     const promises = [];
 
@@ -354,13 +389,7 @@ async function promptUser() {
           console.log(chalk.cyan.bold(`${getCurrentTime()} [Account ${i}/${loopCount}]`));
           console.log(chalk.blue(`${getCurrentTime()} Generating random email...`));
 
-          const domainList = await getEmailRandom(selectedProxy);
-          if (!domainList || domainList.length === 0) {
-            console.log(chalk.red(`${getCurrentTime()} Failed to get email domains`));
-            return;
-          }
-
-          const domain = domainList[Math.floor(Math.random() * domainList.length)];
+          const domain = availableDomains[Math.floor(Math.random() * availableDomains.length)];
           const name = faker.internet.username().toLowerCase().replace(/[^a-z0-9]/g, '').substring(0, 8);
           const email = `${name}@${domain}`;
           console.log(chalk.green.bold(`${getCurrentTime()} Email:`), chalk.white(email));
