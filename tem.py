@@ -62,11 +62,27 @@ class ChatGPTSignupTripleMethod:
         # Method selection: 'alfashop', 'tempmail', or 'imap'
         self.method = method
         
-        # Create session
+        # Create session (rebuilt per account/HTTP retry to avoid shared state 400s)
+        self.session = None
+        self.client_id = "app_X8zY6vW2pQ9tR3dE7nK1jL5gH"
+        self._build_session()
+
+        self.email = None
+        self.password = None
+        self.temp_mail_token = None
+
+        # Lock
+        self.lock = threading.Lock()
+
+    def _build_session(self):
+        """Create isolated scraper session for this account"""
+        self.device_id = str(uuid.uuid4())
+        self.auth_session_logging_id = str(uuid.uuid4())
+
         self.session = cloudscraper.create_scraper(
             browser={'browser': 'chrome', 'platform': 'windows', 'desktop': True}
         )
-        
+
         self.session.headers.update({
             'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/141.0.0.0 Safari/537.36',
             'Accept-Language': 'en-US,en;q=0.9',
@@ -74,17 +90,39 @@ class ChatGPTSignupTripleMethod:
             'sec-ch-ua-mobile': '?0',
             'sec-ch-ua-platform': '"Windows"',
         })
-        
-        self.client_id = "app_X8zY6vW2pQ9tR3dE7nK1jL5gH"
-        self.device_id = str(uuid.uuid4())
-        self.auth_session_logging_id = str(uuid.uuid4())
-        
-        self.email = None
-        self.password = None
-        self.temp_mail_token = None
-        
-        # Lock
-        self.lock = threading.Lock()
+
+        self.log("🔄 New session created for account")
+
+    def _request(self, method: str, url: str, retry_on_4xx: bool = True, **kwargs):
+        """Perform HTTP request with automatic session rebuild on 4xx/error"""
+        last_error = None
+
+        for attempt in range(2):
+            try:
+                if not self.session:
+                    self._build_session()
+
+                response = self.session.request(method.upper(), url, **kwargs)
+
+                if retry_on_4xx and response.status_code in [400, 401, 403]:
+                    if attempt == 0:
+                        self.log(f"⚠️ {method.upper()} {url} -> {response.status_code}, rebuilding session")
+                        self._build_session()
+                        continue
+
+                return response
+
+            except Exception as e:
+                last_error = e
+                if attempt == 0:
+                    self.log(f"⚠️ {method.upper()} {url} error: {e}, rebuilding session")
+                    self._build_session()
+                    continue
+                raise
+
+        if last_error:
+            raise last_error
+        return None
     
     def log(self, message: str):
         """Thread-safe logging"""
@@ -150,7 +188,8 @@ class ChatGPTSignupTripleMethod:
             
             url = f'{self.alfashop_base_url}/email/create/{self.alfashop_api_key}'
             
-            response = self.session.get(
+            response = self._request(
+                'get',
                 url,
                 params={'domain': domain},
                 timeout=10
@@ -230,7 +269,7 @@ class ChatGPTSignupTripleMethod:
                 for endpoint in endpoint_patterns:
                     try:
                         url = f'{self.alfashop_base_url}/{endpoint}'
-                        response = self.session.get(url, timeout=10)
+                        response = self._request('get', url, timeout=10)
                         
                         if response.ok:
                             content = response.text.strip()
@@ -300,7 +339,8 @@ class ChatGPTSignupTripleMethod:
             domain = random.choice(self.TEMP_MAIL_DOMAINS)
             username = self.generate_clean_username()
             
-            response = self.session.post(
+            response = self._request(
+                'post',
                 'https://api.internal.temp-mail.io/api/v3/email/new',
                 headers={'Content-Type': 'application/json', 'Accept': 'application/json'},
                 json={'name': username, 'domain': domain},
@@ -338,7 +378,8 @@ class ChatGPTSignupTripleMethod:
             try:
                 check_count += 1
                 
-                response = self.session.get(
+                response = self._request(
+                    'get',
                     f'https://api.internal.temp-mail.io/api/v3/email/{email_address}/messages',
                     headers={'Authorization': f'Bearer {token}', 'Accept': 'application/json'},
                     timeout=10
@@ -376,8 +417,17 @@ class ChatGPTSignupTripleMethod:
     
     # ==================== METHOD 3: GMAIL IMAP ====================
     
-    def generate_imap_email(self, domain: str) -> str:
-        """📧 METHOD 3: Generate email with custom domain"""
+    def generate_imap_email(self, domain: Optional[str], use_gmail_plus: bool = False) -> str:
+        """📧 METHOD 3: Generate email with custom domain or Gmail "+" alias"""
+        if use_gmail_plus:
+            local_part, _, base_domain = self.gmail_user.partition('@')
+            base_domain = base_domain or 'gmail.com'
+
+            tag = f"+{self.generate_clean_username()}{random.randint(1000, 9999)}"
+            email_address = f"{local_part}{tag}@{base_domain}"
+            self.log(f"✅ Gmail (+): {email_address}")
+            return email_address.lower()
+
         try:
             from faker import Faker
             fake = Faker()
@@ -385,7 +435,7 @@ class ChatGPTSignupTripleMethod:
         except:
             names = ['james', 'mary', 'john', 'patricia', 'robert']
             name = random.choice(names)
-        
+
         suffix = random.randint(1000, 9999)
         email_address = f"{name}{suffix}@{domain}"
         self.log(f"✅ Gmail: {email_address}")
@@ -396,14 +446,14 @@ class ChatGPTSignupTripleMethod:
         self.log(f"⏳ Checking IMAP (max {max_wait}s)...")
         start_time = time.time()
         check_count = 0
-        
+
         while (time.time() - start_time) < max_wait:
             try:
                 if check_count > 0:
-                    time.sleep(3)
-                
+                    time.sleep(2)
+
                 check_count += 1
-                
+
                 mail = imaplib.IMAP4_SSL("imap.gmail.com", 993)
                 mail.login(self.gmail_user, self.gmail_password)
                 
@@ -414,45 +464,52 @@ class ChatGPTSignupTripleMethod:
                         mail.select(f'"{folder}"', readonly=True)
                         _, message_numbers = mail.search(None, '(FROM "noreply@tm.openai.com")')
                         
-                        if message_numbers[0]:
-                            email_ids = message_numbers[0].split()
-                            
-                            for email_id in reversed(email_ids[-15:]):
-                                try:
-                                    _, msg_data = mail.fetch(email_id, "(RFC822)")
-                                    email_body = msg_data[0][1]
-                                    email_message = email.message_from_bytes(email_body)
-                                    
-                                    to_address = email_message.get('To', '').lower()
-                                    
-                                    if target_email.lower() in to_address:
-                                        body = ""
-                                        if email_message.is_multipart():
-                                            for part in email_message.walk():
-                                                if part.get_content_type() in ["text/plain", "text/html"]:
-                                                    try:
-                                                        body += part.get_payload(decode=True).decode(errors='ignore')
-                                                    except:
-                                                        pass
-                                        else:
-                                            try:
-                                                body = email_message.get_payload(decode=True).decode(errors='ignore')
-                                            except:
-                                                pass
-                                        
-                                        match = re.search(r'\b(\d{6})\b', body)
-                                        if match:
-                                            otp = match.group(1)
-                                            elapsed = time.time() - start_time
-                                            self.log(f"🔑 OTP: {otp} ({elapsed:.1f}s)")
-                                            mail.logout()
-                                            return otp
-                                
-                                except:
-                                    continue
+                        if not message_numbers[0]:
+                            continue
+
+                        email_ids = message_numbers[0].split()
+
+                        for email_id in reversed(email_ids[-15:]):
+                            try:
+                                _, msg_data = mail.fetch(email_id, "(RFC822)")
+                                email_body = msg_data[0][1]
+                                email_message = email.message_from_bytes(email_body)
+
+                                headers_to_check = [
+                                    email_message.get('To', ''),
+                                    email_message.get('Delivered-To', ''),
+                                    email_message.get('X-Original-To', '')
+                                ]
+                                headers_to_check = [h.lower() for h in headers_to_check if h]
+
+                                if any(target_email.lower() in h for h in headers_to_check):
+                                    body = ""
+                                    if email_message.is_multipart():
+                                        for part in email_message.walk():
+                                            if part.get_content_type() in ["text/plain", "text/html"]:
+                                                try:
+                                                    body += part.get_payload(decode=True).decode(errors='ignore')
+                                                except:
+                                                    pass
+                                    else:
+                                        try:
+                                            body = email_message.get_payload(decode=True).decode(errors='ignore')
+                                        except:
+                                            pass
+
+                                    match = re.search(r'\b(\d{6})\b', body)
+                                    if match:
+                                        otp = match.group(1)
+                                        elapsed = time.time() - start_time
+                                        self.log(f"🔑 OTP: {otp} ({elapsed:.1f}s)")
+                                        mail.logout()
+                                        return otp
+
+                            except:
+                                continue
                     except:
                         continue
-                
+
                 mail.logout()
                 
             except:
@@ -466,7 +523,7 @@ class ChatGPTSignupTripleMethod:
     def start_oauth_flow(self, email: str) -> bool:
         """Start OAuth flow"""
         try:
-            self.session.get(self.chatgpt_url, timeout=30)
+            self._request('get', self.chatgpt_url, timeout=30)
             time.sleep(0.5)
             
             state = str(uuid.uuid4())
@@ -498,7 +555,7 @@ class ChatGPTSignupTripleMethod:
                 'Sec-Fetch-User': '?1',
             })
             
-            response = self.session.get(url, params=params, headers=headers, allow_redirects=True, timeout=30)
+            response = self._request('get', url, params=params, headers=headers, allow_redirects=True, timeout=30)
             
             if response.status_code == 200:
                 self.log("✅ OAuth started")
@@ -527,7 +584,7 @@ class ChatGPTSignupTripleMethod:
         payload = {"username": email, "password": password}
         
         try:
-            response = self.session.post(url, headers=headers, json=payload, timeout=30)
+            response = self._request('post', url, headers=headers, json=payload, timeout=30)
             
             if response.status_code == 200:
                 self.log("✅ Registered")
@@ -551,7 +608,7 @@ class ChatGPTSignupTripleMethod:
         })
         
         try:
-            response = self.session.get(url, headers=headers, allow_redirects=True, timeout=30)
+            response = self._request('get', url, headers=headers, allow_redirects=True, timeout=30)
             
             if response.status_code in [200, 302]:
                 self.log("✅ OTP sent")
@@ -579,7 +636,7 @@ class ChatGPTSignupTripleMethod:
         payload = {"code": code}
         
         try:
-            response = self.session.post(url, headers=headers, json=payload, timeout=30)
+            response = self._request('post', url, headers=headers, json=payload, timeout=30)
             
             if response.status_code == 200:
                 self.log("✅ OTP validated")
@@ -608,7 +665,7 @@ class ChatGPTSignupTripleMethod:
         payload = {"name": name, "birthdate": birthdate}
         
         try:
-            response = self.session.post(url, headers=headers, json=payload, timeout=30)
+            response = self._request('post', url, headers=headers, json=payload, timeout=30)
             
             if response.status_code == 200:
                 self.log("✅ Account created!")
@@ -681,7 +738,7 @@ class ChatGPTSignupTripleMethod:
 
 def create_single_account(args):
     """Worker function"""
-    thread_id, gmail_user, gmail_password, alfashop_api_key, method, domain, password = args
+    thread_id, gmail_user, gmail_password, alfashop_api_key, method, domain, use_gmail_plus, password = args
     
     try:
         bot = ChatGPTSignupTripleMethod(
@@ -704,7 +761,7 @@ def create_single_account(args):
             email_address, token = bot.generate_tempmail_email()
             bot.temp_mail_token = token
         else:
-            email_address = bot.generate_imap_email(domain)
+            email_address = bot.generate_imap_email(domain, use_gmail_plus=use_gmail_plus)
         
         # Create account
         success = bot.create_account_auto(
@@ -743,20 +800,32 @@ def get_user_input():
     print("\n📊 SELECT METHOD:")
     method_choice = input("Enter method [1=Alfashop, 2=Temp-Mail, 3=IMAP] (default 1): ").strip()
     
+    use_gmail_plus = False
+
     if method_choice == '2':
         method = 'tempmail'
         domain = None
         print("✅ Selected: Temp-Mail.io")
     elif method_choice == '3':
         method = 'imap'
-        print("\n🌐 Available domains:")
-        domains = ['dressrosa.me', 'puella.shop', 'wemel.top']
-        for i, d in enumerate(domains, 1):
-            print(f"   [{i}] {d}")
-        
-        domain_choice = int(input("\nSelect domain (1-3, default 1): ").strip() or '1')
-        domain = domains[domain_choice - 1]
-        print(f"✅ Selected: Gmail IMAP + {domain}")
+        print("\n🌐 IMAP modes:")
+        print("   [1] Custom domain (default)")
+        print("   [2] Gmail '+' alias (faster, no domain needed)")
+        mode_choice = input("Choose IMAP mode (1-2, default 1): ").strip()
+
+        if mode_choice == '2':
+            use_gmail_plus = True
+            domain = None
+            print("✅ Selected: Gmail IMAP with '+' alias")
+        else:
+            print("\n🌐 Available domains:")
+            domains = ['dressrosa.me', 'puella.shop', 'wemel.top']
+            for i, d in enumerate(domains, 1):
+                print(f"   [{i}] {d}")
+
+            domain_choice = int(input("\nSelect domain (1-3, default 1): ").strip() or '1')
+            domain = domains[domain_choice - 1]
+            print(f"✅ Selected: Gmail IMAP + {domain}")
     else:
         method = 'alfashop'
         domain = None
@@ -785,7 +854,7 @@ def get_user_input():
     if not password:
         password = default_pass
     
-    return num_accounts, max_workers, method, domain, password
+    return num_accounts, max_workers, method, domain, use_gmail_plus, password
 
 
 def main():
@@ -796,14 +865,17 @@ def main():
     ALFASHOP_API_KEY = 'K3UyGiVOrN6aSvP9RXZ0'
     
     # Get config
-    num_accounts, max_workers, method, domain, password = get_user_input()
+    num_accounts, max_workers, method, domain, use_gmail_plus, password = get_user_input()
     
     print(f"\n🎯 Configuration:")
     print(f"   Method: {method.upper()}")
     print(f"   Accounts: {num_accounts}")
     print(f"   Threads: {max_workers}")
     if method == 'imap':
-        print(f"   Domain: {domain}")
+        if use_gmail_plus:
+            print(f"   Mode: Gmail '+' alias")
+        else:
+            print(f"   Domain: {domain}")
     elif method == 'alfashop':
         print(f"   Domains: {len(ChatGPTSignupTripleMethod.ALFASHOP_DOMAINS)} Alfashop domains")
     else:
@@ -824,6 +896,7 @@ def main():
             ALFASHOP_API_KEY,
             method,
             domain,
+            use_gmail_plus,
             password
         ))
     
