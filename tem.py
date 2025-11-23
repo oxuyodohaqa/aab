@@ -62,11 +62,27 @@ class ChatGPTSignupTripleMethod:
         # Method selection: 'alfashop', 'tempmail', or 'imap'
         self.method = method
         
-        # Create session
+        # Create session (rebuilt per account/HTTP retry to avoid shared state 400s)
+        self.session = None
+        self.client_id = "app_X8zY6vW2pQ9tR3dE7nK1jL5gH"
+        self._build_session()
+
+        self.email = None
+        self.password = None
+        self.temp_mail_token = None
+
+        # Lock
+        self.lock = threading.Lock()
+
+    def _build_session(self):
+        """Create isolated scraper session for this account"""
+        self.device_id = str(uuid.uuid4())
+        self.auth_session_logging_id = str(uuid.uuid4())
+
         self.session = cloudscraper.create_scraper(
             browser={'browser': 'chrome', 'platform': 'windows', 'desktop': True}
         )
-        
+
         self.session.headers.update({
             'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/141.0.0.0 Safari/537.36',
             'Accept-Language': 'en-US,en;q=0.9',
@@ -74,17 +90,39 @@ class ChatGPTSignupTripleMethod:
             'sec-ch-ua-mobile': '?0',
             'sec-ch-ua-platform': '"Windows"',
         })
-        
-        self.client_id = "app_X8zY6vW2pQ9tR3dE7nK1jL5gH"
-        self.device_id = str(uuid.uuid4())
-        self.auth_session_logging_id = str(uuid.uuid4())
-        
-        self.email = None
-        self.password = None
-        self.temp_mail_token = None
-        
-        # Lock
-        self.lock = threading.Lock()
+
+        self.log("🔄 New session created for account")
+
+    def _request(self, method: str, url: str, retry_on_4xx: bool = True, **kwargs):
+        """Perform HTTP request with automatic session rebuild on 4xx/error"""
+        last_error = None
+
+        for attempt in range(2):
+            try:
+                if not self.session:
+                    self._build_session()
+
+                response = self.session.request(method.upper(), url, **kwargs)
+
+                if retry_on_4xx and response.status_code in [400, 401, 403]:
+                    if attempt == 0:
+                        self.log(f"⚠️ {method.upper()} {url} -> {response.status_code}, rebuilding session")
+                        self._build_session()
+                        continue
+
+                return response
+
+            except Exception as e:
+                last_error = e
+                if attempt == 0:
+                    self.log(f"⚠️ {method.upper()} {url} error: {e}, rebuilding session")
+                    self._build_session()
+                    continue
+                raise
+
+        if last_error:
+            raise last_error
+        return None
     
     def log(self, message: str):
         """Thread-safe logging"""
@@ -150,7 +188,8 @@ class ChatGPTSignupTripleMethod:
             
             url = f'{self.alfashop_base_url}/email/create/{self.alfashop_api_key}'
             
-            response = self.session.get(
+            response = self._request(
+                'get',
                 url,
                 params={'domain': domain},
                 timeout=10
@@ -230,7 +269,7 @@ class ChatGPTSignupTripleMethod:
                 for endpoint in endpoint_patterns:
                     try:
                         url = f'{self.alfashop_base_url}/{endpoint}'
-                        response = self.session.get(url, timeout=10)
+                        response = self._request('get', url, timeout=10)
                         
                         if response.ok:
                             content = response.text.strip()
@@ -300,7 +339,8 @@ class ChatGPTSignupTripleMethod:
             domain = random.choice(self.TEMP_MAIL_DOMAINS)
             username = self.generate_clean_username()
             
-            response = self.session.post(
+            response = self._request(
+                'post',
                 'https://api.internal.temp-mail.io/api/v3/email/new',
                 headers={'Content-Type': 'application/json', 'Accept': 'application/json'},
                 json={'name': username, 'domain': domain},
@@ -338,7 +378,8 @@ class ChatGPTSignupTripleMethod:
             try:
                 check_count += 1
                 
-                response = self.session.get(
+                response = self._request(
+                    'get',
                     f'https://api.internal.temp-mail.io/api/v3/email/{email_address}/messages',
                     headers={'Authorization': f'Bearer {token}', 'Accept': 'application/json'},
                     timeout=10
@@ -482,7 +523,7 @@ class ChatGPTSignupTripleMethod:
     def start_oauth_flow(self, email: str) -> bool:
         """Start OAuth flow"""
         try:
-            self.session.get(self.chatgpt_url, timeout=30)
+            self._request('get', self.chatgpt_url, timeout=30)
             time.sleep(0.5)
             
             state = str(uuid.uuid4())
@@ -514,7 +555,7 @@ class ChatGPTSignupTripleMethod:
                 'Sec-Fetch-User': '?1',
             })
             
-            response = self.session.get(url, params=params, headers=headers, allow_redirects=True, timeout=30)
+            response = self._request('get', url, params=params, headers=headers, allow_redirects=True, timeout=30)
             
             if response.status_code == 200:
                 self.log("✅ OAuth started")
@@ -543,7 +584,7 @@ class ChatGPTSignupTripleMethod:
         payload = {"username": email, "password": password}
         
         try:
-            response = self.session.post(url, headers=headers, json=payload, timeout=30)
+            response = self._request('post', url, headers=headers, json=payload, timeout=30)
             
             if response.status_code == 200:
                 self.log("✅ Registered")
@@ -567,7 +608,7 @@ class ChatGPTSignupTripleMethod:
         })
         
         try:
-            response = self.session.get(url, headers=headers, allow_redirects=True, timeout=30)
+            response = self._request('get', url, headers=headers, allow_redirects=True, timeout=30)
             
             if response.status_code in [200, 302]:
                 self.log("✅ OTP sent")
@@ -595,7 +636,7 @@ class ChatGPTSignupTripleMethod:
         payload = {"code": code}
         
         try:
-            response = self.session.post(url, headers=headers, json=payload, timeout=30)
+            response = self._request('post', url, headers=headers, json=payload, timeout=30)
             
             if response.status_code == 200:
                 self.log("✅ OTP validated")
@@ -624,7 +665,7 @@ class ChatGPTSignupTripleMethod:
         payload = {"name": name, "birthdate": birthdate}
         
         try:
-            response = self.session.post(url, headers=headers, json=payload, timeout=30)
+            response = self._request('post', url, headers=headers, json=payload, timeout=30)
             
             if response.status_code == 200:
                 self.log("✅ Account created!")
