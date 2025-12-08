@@ -74,7 +74,14 @@ class ChatGPTAccountCreator:
             return default_config
     
     def load_domains(self) -> List[str]:
-        default_domains = ['stafflazarus.com']  # Fallback if file doesn't exist
+        default_domains = [
+            'stafflazarus.com',
+            'userghost.com',
+            'ngedit.my.id',
+            'cogil.my.id',
+            'cegil.my.id',
+            'canpapro.my.id'
+        ]  # Fallback if file doesn't exist
 
         api_domains = self.fetch_tmail_domains()
         if api_domains:
@@ -110,7 +117,12 @@ class ChatGPTAccountCreator:
             )
             if response.ok:
                 data = response.json()
-                domains = data.get('data') or data.get('domains') or data
+                if isinstance(data, list):
+                    domains = data
+                elif isinstance(data, dict):
+                    domains = data.get('data') or data.get('domains') or data
+                else:
+                    domains = []
                 if isinstance(domains, list) and domains:
                     cleaned = [d.strip() for d in domains if d and isinstance(d, str)]
                     if cleaned:
