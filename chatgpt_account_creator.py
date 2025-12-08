@@ -27,6 +27,8 @@ class ChatGPTAccountCreator:
         self.accounts_file = 'accounts.txt'
         self.admin_key = "Salah123.ss"
         self.email_api_url = "https://mailt.stafflazarus.com/api/get-last-email"
+        self.tmail_base_url = "https://userghost.com/api"
+        self.tmail_api_key = "MSU9cb6pJDH8RnFkWrmQ"
         self.created_accounts = []
         self.config_file = 'config.json'
         self.domains_file = 'domains.txt'
@@ -73,7 +75,11 @@ class ChatGPTAccountCreator:
     
     def load_domains(self) -> List[str]:
         default_domains = ['stafflazarus.com']  # Fallback if file doesn't exist
-        
+
+        api_domains = self.fetch_tmail_domains()
+        if api_domains:
+            return api_domains
+
         try:
             if os.path.exists(self.domains_file):
                 with open(self.domains_file, 'r', encoding='utf-8') as f:
@@ -83,22 +89,36 @@ class ChatGPTAccountCreator:
                         # Skip empty lines and comments
                         if line and not line.startswith('#'):
                             domains.append(line)
-                    
+
                     if domains:
-                        #self.log(f"📝 Loaded {len(domains)} domain(s) from {self.domains_file}")
                         return domains
                     else:
-                        #self.log(f"⚠️ {self.domains_file} is empty, using default domain", "WARNING")
                         return default_domains
             else:
                 # Create default domains.txt file
                 with open(self.domains_file, 'w', encoding='utf-8') as f:
                     f.write("stafflazarus.com\n")
-                #self.log(f"📝 Created default {self.domains_file} with default domain")
                 return default_domains
-        except Exception as e:
-            #self.log(f"⚠️ Error loading domains from {self.domains_file}: {e}, using defaults", "WARNING")
+        except Exception:
             return default_domains
+
+    def fetch_tmail_domains(self) -> List[str]:
+        """Fetch available domains from the Tmail API."""
+        try:
+            response = requests.get(
+                f"{self.tmail_base_url}/domains/{self.tmail_api_key}", timeout=15
+            )
+            if response.ok:
+                data = response.json()
+                domains = data.get('data') or data.get('domains') or data
+                if isinstance(domains, list) and domains:
+                    cleaned = [d.strip() for d in domains if d and isinstance(d, str)]
+                    if cleaned:
+                        self.log(f"📝 Loaded {len(cleaned)} domain(s) from Tmail API")
+                        return cleaned
+        except Exception as e:
+            self.log(f"⚠️ Error fetching Tmail domains: {e}", "WARNING")
+        return []
     
     def ensure_playwright_firefox(self):
         try:
@@ -127,16 +147,42 @@ class ChatGPTAccountCreator:
             )
         except Exception as e:pass
     
+    def create_tmail_email(self) -> Optional[str]:
+        """Create an inbox using the Tmail API (UserGhost)."""
+        if not self.pro_domains:
+            return None
+
+        domain = random.choice(self.pro_domains)
+        try:
+            response = requests.get(
+                f"{self.tmail_base_url}/email/create/{self.tmail_api_key}",
+                params={'domain': domain},
+                timeout=15
+            )
+            if response.ok:
+                email_address = response.text.strip()
+                if '@' in email_address and '.' in email_address:
+                    self.log(f"✅ Tmail email created: {email_address}")
+                    return email_address
+                self.log(f"⚠️ Unexpected email response: {email_address}", "WARNING")
+        except Exception as e:
+            self.log(f"⚠️ Error creating Tmail email: {e}", "WARNING")
+        return None
+
     def generate_random_email(self) -> str:
         if not self.pro_domains:
             self.log("❌ No domains available! Please add domains to domains.txt", "ERROR")
             raise ValueError("No domains available")
-        
+
+        tmail_email = self.create_tmail_email()
+        if tmail_email:
+            return tmail_email
+
         username_length = random.randint(8, 12)
         username = ''.join(random.choices(string.ascii_lowercase + string.digits, k=username_length))
-        
+
         domain = random.choice(self.pro_domains)
-        
+
         return f"{username}@{domain}"
     
     def generate_random_password(self) -> str:
@@ -224,43 +270,141 @@ class ChatGPTAccountCreator:
         except Exception as e:
             self.log(f"❌ Error saving account: {str(e)}", "ERROR")
     
-    def get_verification_code(self, email: str, max_retries: int = 5, delay: int = 2) -> Optional[str]:
-        """Get verification code from email API"""
+    def extract_otp_from_html(self, html_content: str) -> Optional[str]:
+        """Extract a 6-digit OTP from HTML or plain text content."""
+        if not html_content:
+            return None
+
+        match = re.search(r'\b(\d{6})\b', html_content)
+        if match:
+            return match.group(1)
+
+        match = re.search(r'Your ChatGPT code is (\d{6})', html_content, re.IGNORECASE)
+        if match:
+            return match.group(1)
+
+        text = re.sub(r'<[^>]+>', ' ', html_content)
+        patterns = [
+            r'verification code[:\s]*(\d{6})',
+            r'code[:\s]*(\d{6})',
+            r'\b(\d{6})\b',
+        ]
+
+        for pattern in patterns:
+            match = re.search(pattern, text, re.IGNORECASE)
+            if match:
+                return match.group(1)
+
+        return None
+
+    def get_verification_code_from_tmail(self, email: str, max_wait: int = 120) -> Optional[str]:
+        """Check the UserGhost Tmail inbox for a ChatGPT OTP."""
+        if not email:
+            return None
+
+        self.log(f"⏳ Checking Tmail inbox for {email} (max {max_wait}s)...")
+        start_time = time.time()
+        endpoint_patterns = [
+            f"email/{email}/messages/{self.tmail_api_key}",
+            f"messages/{email}/{self.tmail_api_key}",
+            f"inbox/{email}/{self.tmail_api_key}",
+            f"mail/{email}/{self.tmail_api_key}",
+        ]
+
+        while (time.time() - start_time) < max_wait:
+            for endpoint in endpoint_patterns:
+                try:
+                    url = f"{self.tmail_base_url}/{endpoint}"
+                    response = requests.get(url, timeout=15)
+                    if not response.ok:
+                        continue
+
+                    content = response.text.strip()
+                    if not content or len(content) < 20:
+                        continue
+
+                    try:
+                        data = response.json()
+                        messages = None
+                        if isinstance(data, list) and data:
+                            messages = data
+                        elif isinstance(data, dict):
+                            messages = data.get('messages') or data.get('data') or data.get('emails')
+
+                        if messages:
+                            message = messages[0] if isinstance(messages, list) else messages
+                            html_body = ''
+                            if isinstance(message, dict):
+                                html_body = (
+                                    message.get('html') or
+                                    message.get('body_html') or
+                                    message.get('html_body') or
+                                    message.get('content') or
+                                    message.get('body') or
+                                    str(message)
+                                )
+                            else:
+                                html_body = str(message)
+
+                            otp = self.extract_otp_from_html(html_body)
+                            if otp:
+                                elapsed = time.time() - start_time
+                                self.log(f"🔑 OTP found via Tmail: {otp} ({elapsed:.1f}s)")
+                                return otp
+                    except ValueError:
+                        otp = self.extract_otp_from_html(content)
+                        if otp:
+                            elapsed = time.time() - start_time
+                            self.log(f"🔑 OTP found via Tmail: {otp} ({elapsed:.1f}s)")
+                            return otp
+                except Exception:
+                    continue
+
+            time.sleep(3)
+
+        self.log(f"❌ Timeout waiting for Tmail OTP ({max_wait}s)", "ERROR")
+        return None
+
+    def get_verification_code(self, email: str, max_retries: int = 5, delay: int = 2, max_wait: int = 120) -> Optional[str]:
+        """Get verification code from Tmail first, then fallback API."""
+        code = self.get_verification_code_from_tmail(email, max_wait=max_wait)
+        if code:
+            return code
+
         for attempt in range(max_retries):
             try:
                 payload = {
                     "adminKey": self.admin_key,
                     "email": email
                 }
-                
+
                 response = requests.post(
                     self.email_api_url,
                     json=payload,
                     headers={'Content-Type': 'application/json'},
                     timeout=10
                 )
-                
+
                 if response.status_code == 200:
                     data = response.json()
                     if data.get('success') and data.get('email'):
                         subject = data['email'].get('subject', '')
                         if 'code is' in subject.lower():
-                            import re
                             code_match = re.search(r'code is\s+(\d+)', subject, re.IGNORECASE)
                             if code_match:
                                 code = code_match.group(1)
                                 self.log(f"✅ Retrieved verification code: {code}")
                                 return code
-                
+
                 if attempt < max_retries - 1:
                     self.log(f"⏳ Code not found, waiting {delay}s before retry {attempt + 1}/{max_retries}...")
                     time.sleep(delay)
-                    
+
             except Exception as e:
                 self.log(f"⚠️ Error fetching verification code (attempt {attempt + 1}): {e}", "WARNING")
                 if attempt < max_retries - 1:
                     time.sleep(delay)
-        
+
         self.log(f"❌ Failed to get verification code after {max_retries} attempts", "ERROR")
         return None
     
