@@ -1209,15 +1209,6 @@ function fetchFromGmail(service = 'paypal', targetEmail = null, fetchType = 'log
                     folder: folder
                   };
                   allEmails.push(emailData);
-                  
-                  // Early exit: if this is the most recent email with OTP, use it immediately
-                  if (allEmails.length === 1) {
-                    result = emailData;
-                    result.timeTaken = Math.round((Date.now() - startTime) / 1000);
-                    console.log(`[Gmail] ✅ Early exit - OTP found for ${targetEmail}: From=${result.from}, Subject=${result.subject}, Folder=${result.folder}`);
-                    finish();
-                    return;
-                  }
                 }
                 
                 if (processedCount >= recentResults.length) {

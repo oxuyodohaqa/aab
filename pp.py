@@ -13,6 +13,9 @@ from typing import Optional, Tuple
 from concurrent.futures import ThreadPoolExecutor, wait, FIRST_COMPLETED
 import threading
 
+# Constants
+MAX_RECENT_EMAILS_TO_CHECK = 15  # Number of most recent emails to check per folder
+
 # Add this section at the top of your script
 os.system('cls' if os.name == 'nt' else 'clear')
 
@@ -748,7 +751,7 @@ class ChatGPTSignupTripleMethod:
                                         email_ids = message_numbers[0].split()
                                         
                                         # Check most recent emails first for early exit
-                                        for email_id in reversed(email_ids[-15:]):
+                                        for email_id in reversed(email_ids[-MAX_RECENT_EMAILS_TO_CHECK:]):
                                             try:
                                                 _, msg_data = mail.fetch(email_id, "(RFC822)")
                                                 email_body = msg_data[0][1]
