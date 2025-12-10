@@ -193,8 +193,8 @@ def wrapper_class_example():
     
     # Initialize with credentials
     fetcher = FastOTPFetcher(
-        gmail_user='aabkhan402@gmail.com',
-        gmail_password='ftljxjidduzsqxob'
+        gmail_user='your-email@gmail.com',
+        gmail_password='your-app-password'
     )
     
     # Fetch OTP (same API as slow Python version)
@@ -216,8 +216,8 @@ def detailed_integration_example():
     print("\n=== Example 3: Detailed Integration ===\n")
     
     fetcher = FastOTPFetcher(
-        gmail_user='aabkhan402@gmail.com',
-        gmail_password='ftljxjidduzsqxob'
+        gmail_user='your-email@gmail.com',
+        gmail_password='your-app-password'
     )
     
     target_email = "test@example.com"
@@ -290,7 +290,7 @@ def replace_slow_code_example():
             return None
     
     # Usage
-    obj = OldClass('aabkhan402@gmail.com', 'ftljxjidduzsqxob')
+    obj = OldClass('your-email@gmail.com', 'your-app-password')
     otp = obj.get_otp_from_imap('test@example.com', max_wait=120)
     print(f"\nResult: {otp}")
 

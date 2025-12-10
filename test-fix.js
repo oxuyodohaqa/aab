@@ -7,8 +7,8 @@ import { IMAPOTPFetcher } from './fix.js';
 
 // Test configuration
 const TEST_CONFIG = {
-  user: process.env.GMAIL_USER || 'aabkhan402@gmail.com',
-  password: process.env.GMAIL_APP_PASSWORD || 'ftljxjidduzsqxob',
+  user: process.env.GMAIL_USER || 'your-email@gmail.com',
+  password: process.env.GMAIL_APP_PASSWORD || 'your-app-password',
   host: 'imap.gmail.com',
   port: 993
 };

@@ -171,7 +171,16 @@ node test-fix.js your-test-email@example.com
 
 ### Environment Variables
 
+**⚠️ Security Note:** Always use environment variables for credentials. Never hardcode them in source code.
+
 ```bash
+export GMAIL_USER=your-email@gmail.com
+export GMAIL_APP_PASSWORD=your-app-password
+```
+
+Or use a `.env` file (make sure to add it to `.gitignore`):
+```bash
+# .env
 GMAIL_USER=your-email@gmail.com
 GMAIL_APP_PASSWORD=your-app-password
 ```

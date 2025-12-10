@@ -564,11 +564,17 @@ class IMAPOTPFetcher {
  */
 async function main() {
   const fetcher = new IMAPOTPFetcher({
-    user: process.env.GMAIL_USER || 'aabkhan402@gmail.com',
-    password: process.env.GMAIL_APP_PASSWORD || 'ftljxjidduzsqxob',
+    user: process.env.GMAIL_USER,
+    password: process.env.GMAIL_APP_PASSWORD,
     host: 'imap.gmail.com',
     port: 993
   });
+
+  if (!fetcher.config.user || !fetcher.config.password) {
+    console.error('❌ Error: GMAIL_USER and GMAIL_APP_PASSWORD environment variables are required');
+    console.error('   Usage: GMAIL_USER=your-email@gmail.com GMAIL_APP_PASSWORD=your-password node fix.js target@example.com');
+    process.exit(1);
+  }
 
   try {
     // Example: Fetch OTP for a target email
