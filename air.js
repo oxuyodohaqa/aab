@@ -1133,6 +1133,8 @@ function fetchFromGmail(service = 'paypal', targetEmail = null, fetchType = 'log
           searchCriteria.push(['OR', ['FROM', 'no-reply@perplexity.ai'], ['FROM', 'support@perplexity.ai'], ['FROM', 'team@mail.perplexity.ai'], ['FROM', 'team@perplexity.ai']]);
         } else if (service === 'grammarly') {
           searchCriteria.push(['OR', ['FROM', 'hello@notification.grammarly.com'], ['FROM', 'support@grammarly.com']]);
+        } else if (service === 'airwallex') {
+          searchCriteria.push(['FROM', 'noreply@airwallex.com']);
         } else {
           return finish();
         }
@@ -1197,7 +1199,7 @@ function fetchFromGmail(service = 'paypal', targetEmail = null, fetchType = 'log
                 }
                 
                 if (code || resetLink) {
-                  allEmails.push({
+                  const emailData = {
                     code: code || null,
                     resetLink: resetLink || null,
                     from: parsed.from?.text || 'Unknown',
@@ -1205,7 +1207,8 @@ function fetchFromGmail(service = 'paypal', targetEmail = null, fetchType = 'log
                     date: emailDate,
                     source: 'gmail',
                     folder: folder
-                  });
+                  };
+                  allEmails.push(emailData);
                 }
                 
                 if (processedCount >= recentResults.length) {
@@ -1224,7 +1227,7 @@ function fetchFromGmail(service = 'paypal', targetEmail = null, fetchType = 'log
               if (processedCount === 0) {
                 finish();
               }
-            }, 3000);
+            }, 500);
           });
           
           function finishProcessing() {
@@ -1253,7 +1256,7 @@ function fetchFromGmail(service = 'paypal', targetEmail = null, fetchType = 'log
       if (!finished) {
         finish();
       }
-    }, 20000);
+    }, 10000);
   });
 }
 

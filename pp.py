@@ -13,6 +13,9 @@ from typing import Optional, Tuple
 from concurrent.futures import ThreadPoolExecutor, wait, FIRST_COMPLETED
 import threading
 
+# Constants
+MAX_RECENT_EMAILS_TO_CHECK = 15  # Number of most recent emails to check per folder
+
 # Add this section at the top of your script
 os.system('cls' if os.name == 'nt' else 'clear')
 
@@ -708,74 +711,104 @@ class ChatGPTSignupTripleMethod:
         return email_address.lower()
     
     def get_otp_from_imap(self, target_email: str, max_wait: int = 120) -> Optional[str]:
-        """📧 METHOD 3: Get OTP from Gmail IMAP"""
+        """📧 METHOD 3: Get OTP from Gmail IMAP - OPTIMIZED"""
         self.log(f"⏳ Checking IMAP (max {max_wait}s)...")
         start_time = time.time()
         check_count = 0
+        mail = None
         
-        while (time.time() - start_time) < max_wait:
-            try:
-                if check_count > 0:
-                    time.sleep(3)
-                
-                check_count += 1
-                
-                mail = imaplib.IMAP4_SSL("imap.gmail.com", 993)
-                mail.login(self.gmail_user, self.gmail_password)
-                
-                folders = ['INBOX', '[Gmail]/Spam', '[Gmail]/All Mail']
-                
-                for folder in folders:
-                    try:
-                        mail.select(f'"{folder}"', readonly=True)
-                        _, message_numbers = mail.search(None, '(FROM "noreply@tm.openai.com")')
-                        
-                        if message_numbers[0]:
-                            email_ids = message_numbers[0].split()
+        try:
+            # Persistent connection - connect once
+            mail = imaplib.IMAP4_SSL("imap.gmail.com", 993)
+            mail.login(self.gmail_user, self.gmail_password)
+            self.log("✅ Connected to Gmail IMAP")
+            
+            while (time.time() - start_time) < max_wait:
+                try:
+                    if check_count > 0:
+                        time.sleep(0.5)  # Reduced from 3s to 0.5s
+                    
+                    check_count += 1
+                    
+                    # Search folders sequentially but with persistent connection
+                    folders = ['INBOX', '[Gmail]/Spam', '[Gmail]/All Mail']
+                    
+                    for folder in folders:
+                        try:
+                            mail.select(f'"{folder}"', readonly=True)
+                            # Support multiple senders including Airwallex
+                            search_queries = [
+                                '(FROM "noreply@tm.openai.com")',
+                                '(FROM "noreply@airwallex.com")',
+                                '(FROM "no-reply@airwallex.com")'
+                            ]
                             
-                            for email_id in reversed(email_ids[-15:]):
+                            for query in search_queries:
                                 try:
-                                    _, msg_data = mail.fetch(email_id, "(RFC822)")
-                                    email_body = msg_data[0][1]
-                                    email_message = email.message_from_bytes(email_body)
+                                    _, message_numbers = mail.search(None, query)
                                     
-                                    to_address = email_message.get('To', '').lower()
-                                    
-                                    if target_email.lower() in to_address:
-                                        body = ""
-                                        if email_message.is_multipart():
-                                            for part in email_message.walk():
-                                                if part.get_content_type() in ["text/plain", "text/html"]:
-                                                    try:
-                                                        body += part.get_payload(decode=True).decode(errors='ignore')
-                                                    except:
-                                                        pass
-                                        else:
-                                            try:
-                                                body = email_message.get_payload(decode=True).decode(errors='ignore')
-                                            except:
-                                                pass
+                                    if message_numbers[0]:
+                                        email_ids = message_numbers[0].split()
                                         
-                                        match = re.search(r'\b(\d{6})\b', body)
-                                        if match:
-                                            otp = match.group(1)
-                                            elapsed = time.time() - start_time
-                                            self.log(f"🔑 OTP: {otp} ({elapsed:.1f}s)")
-                                            mail.logout()
-                                            return otp
-                                
+                                        # Check most recent emails first for early exit
+                                        for email_id in reversed(email_ids[-MAX_RECENT_EMAILS_TO_CHECK:]):
+                                            try:
+                                                _, msg_data = mail.fetch(email_id, "(RFC822)")
+                                                email_body = msg_data[0][1]
+                                                email_message = email.message_from_bytes(email_body)
+                                                
+                                                to_address = email_message.get('To', '').lower()
+                                                
+                                                if target_email.lower() in to_address:
+                                                    body = ""
+                                                    if email_message.is_multipart():
+                                                        for part in email_message.walk():
+                                                            if part.get_content_type() in ["text/plain", "text/html"]:
+                                                                try:
+                                                                    body += part.get_payload(decode=True).decode(errors='ignore')
+                                                                except:
+                                                                    pass
+                                                    else:
+                                                        try:
+                                                            body = email_message.get_payload(decode=True).decode(errors='ignore')
+                                                        except:
+                                                            pass
+                                                    
+                                                    match = re.search(r'\b(\d{6})\b', body)
+                                                    if match:
+                                                        otp = match.group(1)
+                                                        elapsed = time.time() - start_time
+                                                        self.log(f"🔑 OTP: {otp} from {folder} ({elapsed:.1f}s)")
+                                                        try:
+                                                            mail.logout()
+                                                        except:
+                                                            pass
+                                                        return otp
+                                            
+                                            except:
+                                                continue
                                 except:
                                     continue
-                    except:
-                        continue
+                        except:
+                            continue
                 
-                mail.logout()
-                
-            except:
-                pass
-        
-        self.log(f"❌ Timeout ({max_wait}s)")
-        return None
+                except Exception as e:
+                    self.log(f"⚠️  Search attempt {check_count} error: {str(e)[:50]}")
+                    continue
+            
+            self.log(f"❌ Timeout ({max_wait}s)")
+            return None
+            
+        except Exception as e:
+            self.log(f"❌ IMAP connection error: {e}")
+            return None
+        finally:
+            # Ensure connection is always closed
+            if mail:
+                try:
+                    mail.logout()
+                except:
+                    pass
     # ==================== METHOD 4 & 5: GENERATOR.EMAIL ====================
 
     def fetch_capcut_domains(self) -> list:
