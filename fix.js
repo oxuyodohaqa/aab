@@ -17,6 +17,8 @@
  * Date: 2025-12-10
  */
 
+// Dependencies: npm install imap mailparser
+// Install with: npm install imap@^0.8.19 mailparser@^3.6.5
 const Imap = require('imap');
 const { simpleParser } = require('mailparser');
 const EventEmitter = require('events');
@@ -48,6 +50,9 @@ const CONFIG = {
   // Request queue settings
   maxConcurrent: 10,              // Max concurrent IMAP requests
   queueTimeout: 30000,            // Queue request timeout (30s)
+  
+  // Processing settings
+  emailProcessingTimeout: 500,    // Timeout for email processing (ms)
 };
 
 // ═══════════════════════════════════════════════════════════════
@@ -61,6 +66,7 @@ class ImapConnectionPool {
     this.available = [];
     this.inUse = new Set();
     this.requestCount = new Map();
+    this.connMetadata = new WeakMap(); // Use WeakMap to store connection metadata
     this.poolSize = CONFIG.poolSize;
     this.initialized = false;
   }
@@ -99,8 +105,12 @@ class ImapConnectionPool {
         authTimeout: CONFIG.connectionTimeout,
       });
 
-      imap.poolId = id;
-      imap.lastUsed = Date.now();
+      // Store metadata in WeakMap to avoid modifying library objects
+      this.connMetadata.set(imap, {
+        poolId: id,
+        lastUsed: Date.now(),
+        markedForRefresh: false,
+      });
 
       imap.once('ready', () => {
         console.log(`[Pool] Connection ${id} established`);
@@ -132,7 +142,12 @@ class ImapConnectionPool {
 
     const conn = this.available.shift();
     this.inUse.add(conn);
-    conn.lastUsed = Date.now();
+    
+    // Update metadata using WeakMap
+    const metadata = this.connMetadata.get(conn);
+    if (metadata) {
+      metadata.lastUsed = Date.now();
+    }
     
     // Increment request count
     const count = this.requestCount.get(conn) + 1;
@@ -140,7 +155,8 @@ class ImapConnectionPool {
     
     // Refresh connection if it has handled too many requests
     if (count >= CONFIG.maxRequestsPerConn) {
-      console.log(`[Pool] Connection ${conn.poolId} reached max requests, will refresh`);
+      const poolId = metadata ? metadata.poolId : 'unknown';
+      console.log(`[Pool] Connection ${poolId} reached max requests, will refresh`);
       this._scheduleRefresh(conn);
     }
     
@@ -151,17 +167,22 @@ class ImapConnectionPool {
     if (!conn) return;
     
     this.inUse.delete(conn);
-    if (!conn._markedForRefresh) {
+    const metadata = this.connMetadata.get(conn);
+    if (!metadata || !metadata.markedForRefresh) {
       this.available.push(conn);
     }
   }
 
   async _scheduleRefresh(conn) {
-    conn._markedForRefresh = true;
+    const metadata = this.connMetadata.get(conn);
+    if (metadata) {
+      metadata.markedForRefresh = true;
+    }
     
     // Create new connection
     try {
-      const newConn = await this._createConnection(conn.poolId);
+      const poolId = metadata ? metadata.poolId : 0;
+      const newConn = await this._createConnection(poolId);
       
       // Replace old connection
       const poolIndex = this.pool.indexOf(conn);
@@ -179,9 +200,10 @@ class ImapConnectionPool {
         // Ignore errors
       }
       
-      console.log(`[Pool] Connection ${conn.poolId} refreshed`);
+      console.log(`[Pool] Connection ${poolId} refreshed`);
     } catch (err) {
-      console.error(`[Pool] Failed to refresh connection ${conn.poolId}:`, err.message);
+      const poolId = metadata ? metadata.poolId : 'unknown';
+      console.error(`[Pool] Failed to refresh connection ${poolId}:`, err.message);
     }
   }
 
@@ -312,8 +334,12 @@ class HighPerformanceImapHandler extends EventEmitter {
       port: config.port || 993,
     };
     
-    if (!this.config.user || !this.config.password) {
-      throw new Error('Gmail credentials are required (user and password)');
+    if (!this.config.user) {
+      throw new Error('Gmail user credential is missing. Set GMAIL_USER environment variable or pass "user" in config.');
+    }
+    
+    if (!this.config.password) {
+      throw new Error('Gmail password credential is missing. Set GMAIL_APP_PASSWORD environment variable or pass "password" in config.');
     }
     
     this.pool = new ImapConnectionPool(this.config);
@@ -435,7 +461,13 @@ class HighPerformanceImapHandler extends EventEmitter {
           if (fromFilters.length === 1) {
             searchCriteria.push(['FROM', fromFilters[0]]);
           } else {
-            searchCriteria.push(['OR', ...fromFilters.map(f => ['FROM', f])]);
+            // Build nested OR for multiple FROM addresses
+            // IMAP OR requires exactly 2 operands, so nest them
+            let orClause = ['OR', ['FROM', fromFilters[0]], ['FROM', fromFilters[1]]];
+            for (let i = 2; i < fromFilters.length; i++) {
+              orClause = ['OR', orClause, ['FROM', fromFilters[i]]];
+            }
+            searchCriteria.push(orClause);
           }
         }
         
@@ -517,7 +549,7 @@ class HighPerformanceImapHandler extends EventEmitter {
         if (processedCount === 0) {
           callback(null);
         }
-      }, 500);
+      }, CONFIG.emailProcessingTimeout);
     });
   }
 
