@@ -15,9 +15,16 @@
  * Date: 2025-12-10
  */
 
-const Imap = require('imap');
-const { simpleParser } = require('mailparser');
-const { EventEmitter } = require('events');
+// Dependency validation
+try {
+  var Imap = require('imap');
+  var { simpleParser } = require('mailparser');
+  var { EventEmitter } = require('events');
+} catch (err) {
+  console.error('❌ Missing required dependencies. Install with:');
+  console.error('   npm install imap mailparser');
+  process.exit(1);
+}
 
 // ════════════════════════════════════════════════════════════
 // CONFIGURATION
@@ -47,6 +54,9 @@ const CONFIG = {
   
   // Folders to check (in parallel)
   FOLDERS: ['INBOX', '[Gmail]/Spam', '[Gmail]/All Mail'],
+  
+  // Timeouts
+  FETCH_END_TIMEOUT: 1000,   // Wait for fetch end event
   
   // Logging
   DEBUG: process.env.DEBUG === 'true',
@@ -359,12 +369,15 @@ function extractOTP(text = '', html = '', subject = '') {
     .replace(/\s+/g, ' ')
     .trim();
 
-  // Try multiple patterns
+  // Try multiple patterns (ordered by specificity to avoid false positives)
   const patterns = [
     /\bcode[:\s]*(\d{6})\b/i,
     /\bverification[:\s]*(\d{6})\b/i,
     /\bOTP[:\s]*(\d{6})\b/i,
-    /\b(\d{6})\b/  // Generic 6-digit
+    /\bauthentication[:\s]*(\d{6})\b/i,
+    /\bconfirm[:\s]*(\d{6})\b/i,
+    // Generic 6-digit - last resort, may match dates/IDs
+    /\b(\d{6})\b/
   ];
 
   for (const pattern of patterns) {
@@ -587,7 +600,7 @@ class OptimizedOtpHandler {
           fetch.once('end', () => {
             setTimeout(() => {
               if (processed === 0) resolve(null);
-            }, 1000);
+            }, CONFIG.FETCH_END_TIMEOUT);
           });
         });
       });
@@ -663,13 +676,20 @@ if (require.main === module) {
   (async () => {
     console.log('🚀 Optimized OTP Handler - Demo\n');
     
-    // Configuration
+    // Configuration - Use environment variables only
     const config = {
-      user: process.env.GMAIL_USER || 'aabkhan402@gmail.com',
-      password: process.env.GMAIL_APP_PASSWORD || 'ftljxjidduzsqxob',
+      user: process.env.GMAIL_USER || 'YOUR_GMAIL_HERE',
+      password: process.env.GMAIL_APP_PASSWORD || 'YOUR_APP_PASSWORD_HERE',
       host: 'imap.gmail.com',
       port: 993
     };
+    
+    if (config.user === 'YOUR_GMAIL_HERE' || config.password === 'YOUR_APP_PASSWORD_HERE') {
+      console.error('❌ Please set GMAIL_USER and GMAIL_APP_PASSWORD environment variables');
+      console.error('   Example: export GMAIL_USER=your-email@gmail.com');
+      console.error('   Example: export GMAIL_APP_PASSWORD=your-app-password');
+      process.exit(1);
+    }
 
     const handler = new OptimizedOtpHandler(config);
     
