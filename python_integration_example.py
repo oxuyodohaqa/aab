@@ -12,6 +12,7 @@ This shows three integration methods:
 import subprocess
 import json
 import time
+import os
 from typing import Optional, Dict
 
 
@@ -55,10 +56,11 @@ class FastOTPFetcher:
         """
         try:
             # Set environment variables
-            env = {
+            env = os.environ.copy()
+            env.update({
                 'GMAIL_USER': self.gmail_user,
                 'GMAIL_APP_PASSWORD': self.gmail_password
-            }
+            })
             
             # Call Node.js script
             result = subprocess.run(
@@ -66,16 +68,33 @@ class FastOTPFetcher:
                 capture_output=True,
                 text=True,
                 timeout=max_wait,
-                env={**subprocess.os.environ, **env}
+                env=env
             )
             
             if result.returncode == 0:
                 # Parse output to extract OTP
+                # Supports multiple formats: "Code: 123456", "OTP: 123456", or just "123456"
                 for line in result.stdout.split('\n'):
+                    # Try "Code:" format
                     if 'Code:' in line:
-                        otp = line.split('Code:')[1].strip()
+                        otp = line.split('Code:')[1].strip().split()[0]
                         print(f"✅ OTP fetched in Node.js: {otp}")
                         return otp
+                    # Try "OTP:" format
+                    elif 'OTP:' in line or 'otp:' in line.lower():
+                        parts = line.split(':')
+                        if len(parts) >= 2:
+                            otp = parts[1].strip().split()[0]
+                            print(f"✅ OTP fetched in Node.js: {otp}")
+                            return otp
+                
+                # Try to find any 6-digit number as fallback
+                import re
+                match = re.search(r'\b(\d{6})\b', result.stdout)
+                if match:
+                    otp = match.group(1)
+                    print(f"✅ OTP fetched in Node.js: {otp}")
+                    return otp
             
             print(f"❌ Failed to fetch OTP: {result.stderr}")
             return None
