@@ -779,7 +779,10 @@ class ChatGPTSignupTripleMethod:
                                                         otp = match.group(1)
                                                         elapsed = time.time() - start_time
                                                         self.log(f"🔑 OTP: {otp} from {folder} ({elapsed:.1f}s)")
-                                                        mail.logout()
+                                                        try:
+                                                            mail.logout()
+                                                        except:
+                                                            pass
                                                         return otp
                                             
                                             except:
@@ -794,18 +797,18 @@ class ChatGPTSignupTripleMethod:
                     continue
             
             self.log(f"❌ Timeout ({max_wait}s)")
-            if mail:
-                mail.logout()
             return None
             
         except Exception as e:
             self.log(f"❌ IMAP connection error: {e}")
+            return None
+        finally:
+            # Ensure connection is always closed
             if mail:
                 try:
                     mail.logout()
                 except:
                     pass
-            return None
     # ==================== METHOD 4 & 5: GENERATOR.EMAIL ====================
 
     def fetch_capcut_domains(self) -> list:
