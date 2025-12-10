@@ -270,7 +270,7 @@ async function fetchFromGenerator(email, maxAttempts = 30, delayMs = 500) {
       }
       
       if (attempt < maxAttempts) {
-        // Exponential backoff: starts at 100ms, doubles each time, capped at delayMs
+        // Exponential backoff: starts at 100ms, increases by 1.5x each time, capped at delayMs
         const backoffDelay = Math.min(100 * Math.pow(1.5, attempt - 1), delayMs);
         console.log(`[Generator] Waiting ${Math.round(backoffDelay)}ms before retry (exponential backoff)...`);
         
@@ -420,7 +420,7 @@ async function fetchFromTempMail(email, maxAttempts = 30, delayMs = 500) {
         }
       }
       
-      // Exponential backoff before next attempt
+      // Exponential backoff before next attempt: starts at 100ms, increases by 1.5x each time
       if (attempt < maxAttempts) {
         const backoffDelay = Math.min(100 * Math.pow(1.5, attempt - 1), delayMs);
         console.log(`[TempMail] Waiting ${Math.round(backoffDelay)}ms before retry (exponential backoff)...`);
@@ -442,77 +442,6 @@ async function fetchFromTempMail(email, maxAttempts = 30, delayMs = 500) {
 }
 
 
-
-// ════════════════════════════════════════════════════════════
-// TEMP-MAIL.IO API - FOR CAPCUT & GRAMMARLY
-// ════════════════════════════════════════════════════════════
-
-async function fetchFromTempMail(email, maxAttempts = 30, delayMs = 500) {
-  const [username, domain] = email.split('@');
-  
-  console.log(`[TempMail] Starting OPTIMIZED fetch for ${email}`);
-  console.log(`[TempMail] Config: ${maxAttempts} attempts, ${delayMs}ms base delay, exponential backoff`);
-  
-  if (!TEMP_MAIL_DOMAINS.includes(domain)) {
-    console.log(`[TempMail] Domain ${domain} not in temp-mail list, trying generator...`);
-    return await fetchFromGenerator(email, maxAttempts, delayMs);
-  }
-  
-  for (let attempt = 1; attempt <= maxAttempts; attempt++) {
-    try {
-      console.log(`[TempMail] Attempt ${attempt}/${maxAttempts}`);
-      
-      const response = await axios.get(`https://www.1secmail.com/api/v1/?action=getMessages&login=${username}&domain=${domain}`);
-      
-      if (response.data && response.data.length > 0) {
-        const latestEmail = response.data[0];
-        
-        const emailResponse = await axios.get(
-          `https://www.1secmail.com/api/v1/?action=readMessage&login=${username}&domain=${domain}&id=${latestEmail.id}`
-        );
-        
-        const emailData = emailResponse.data;
-        
-        const code = extractOTP(emailData.textBody || '', emailData.htmlBody || '', emailData.subject || '');
-        const resetLink = extractResetLink(emailData.textBody || '', emailData.htmlBody || '');
-        
-        // Early exit on success
-        if (code || resetLink) {
-          console.log(`[TempMail] ✅ SUCCESS in ${attempt} attempts!`);
-          return {
-            code: code || null,
-            resetLink: resetLink || null,
-            from: emailData.from,
-            subject: emailData.subject,
-            date: new Date(emailData.date),
-            source: 'tempmail',
-            email: email,
-            attempts: attempt,
-            timeTaken: Math.round(attempt * delayMs / 1000)
-          };
-        }
-      }
-      
-      if (attempt < maxAttempts) {
-        // Exponential backoff: starts at 100ms, doubles each time, capped at delayMs
-        const backoffDelay = Math.min(100 * Math.pow(1.5, attempt - 1), delayMs);
-        console.log(`[TempMail] Waiting ${Math.round(backoffDelay)}ms before retry (exponential backoff)...`);
-        await new Promise(resolve => setTimeout(resolve, backoffDelay));
-      }
-      
-    } catch (err) {
-      console.error(`[TempMail] Attempt ${attempt} failed:`, err.message);
-      
-      if (attempt < maxAttempts) {
-        // Fast retry on error
-        await new Promise(resolve => setTimeout(resolve, 200));
-      }
-    }
-  }
-  
-  console.log(`[TempMail] ❌ No email found after ${maxAttempts} attempts`);
-  return null;
-}
 const SPOTIFY_DOMAINS = {
   'multi': [
     'puella.shop',
