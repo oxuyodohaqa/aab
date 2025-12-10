@@ -1,0 +1,30 @@
+{
+  "name": "aab-otp-fetcher",
+  "version": "1.0.0",
+  "description": "High-performance IMAP OTP fetcher with connection pooling and caching",
+  "type": "module",
+  "main": "fix.js",
+  "scripts": {
+    "start": "node fix.js",
+    "test": "node test-fix.js"
+  },
+  "keywords": [
+    "imap",
+    "otp",
+    "email",
+    "high-performance",
+    "connection-pool"
+  ],
+  "author": "Adeebaabkhan",
+  "license": "MIT",
+  "dependencies": {
+    "imap": "^0.8.19",
+    "mailparser": "^3.7.1",
+    "node-fetch": "^3.3.2",
+    "cheerio": "^1.0.0",
+    "chalk": "^5.3.0"
+  },
+  "engines": {
+    "node": ">=18.0.0"
+  }
+}
