@@ -26,8 +26,6 @@ function generateEmail() {
 // CAPTCHA DELAY - Only for Buster operations
 const captchaDelay = (ms) => new Promise(resolve => setTimeout(resolve, ms));
 
-// Global browser counter for positioning
-let browserCounter = 0;
 let totalSuccessful = 0;
 let totalAttempts = 0;
 
@@ -660,20 +658,17 @@ async function clearAndType(page, element, text) {
     await element.type(text, { delay: 30 });
 }
 
-// SIGNUP ONLY FUNCTION - Saves to spotify.txt
-async function signupOnly() {
+async function launchBrowser(browserId) {
     const extensionPath = path.join(__dirname, 'buster');
     const extensionExists = fsSync.existsSync(extensionPath);
-    
+
     if (!extensionExists) {
         throw new Error('Buster extension not found at ./buster/');
     }
-    
-    browserCounter++;
-    const browserId = browserCounter;
+
     const windowPos = getWindowPosition(browserId);
-    
-    const browser = await puppeteer.launch({
+
+    return puppeteer.launch({
         headless: false,
         args: [
             "--no-sandbox",
@@ -692,7 +687,11 @@ async function signupOnly() {
         ],
         defaultViewport: { width: 370, height: 950 }
     });
-    
+}
+
+// SIGNUP ONLY FUNCTION - Saves to spotify.txt
+async function signupOnly(browser, browserId) {
+    let page;
     try {
         const email = generateEmail();
         const firstName = faker.person.firstName();
@@ -701,7 +700,7 @@ async function signupOnly() {
         
         console.log(`[B-${browserId}] 🚀 SIGNUP ONLY: ${email}`);
         
-        const page = await browser.newPage();
+        page = await browser.newPage();
         
         const userAgent = getRandomUserAgent();
         await page.setUserAgent(userAgent);
@@ -982,57 +981,29 @@ async function signupOnly() {
         console.log(`[B-${browserId}] ❌ Error: ${error.message}`);
         return false;
     } finally {
-        try {
-            await browser.close();
-        } catch (e) {}
+        if (page) {
+            try {
+                await page.close();
+            } catch (e) {}
+        }
     }
 }
 
 // ✅ SIGNUP AND VERIFY FUNCTION - EACH ACCOUNT GETS UNIQUE LINK
-async function signupAndVerify() {
-    const extensionPath = path.join(__dirname, 'buster');
-    const extensionExists = fsSync.existsSync(extensionPath);
-    
-    if (!extensionExists) {
-        throw new Error('Buster extension not found at ./buster/');
-    }
-    
+async function signupAndVerify(browser, browserId) {
+    let page;
+
     // ✅ GET UNIQUE LINK (immediately removed from pool)
     const spotifyLink = getNextLink();
-    
+
     if (!spotifyLink) {
         console.log("❌ No verification links available!");
         return false;
     }
-    
-    browserCounter++;
-    const browserId = browserCounter;
-    
+
     // ✅ Assign link to this specific browser
     assignLinkToBrowser(browserId, spotifyLink);
-    
-    const windowPos = getWindowPosition(browserId);
-    
-    const browser = await puppeteer.launch({
-        headless: false,
-        args: [
-            "--no-sandbox",
-            "--disable-setuid-sandbox",
-            "--disable-web-security",
-            "--disable-features=VizDisplayCompositor",
-            "--disable-blink-features=AutomationControlled",
-            "--disable-dev-shm-usage",
-            "--no-first-run",
-            "--disable-default-apps",
-            "--disable-popup-blocking",
-            `--disable-extensions-except=${extensionPath}`,
-            `--load-extension=${extensionPath}`,
-            `--window-size=370,950`,
-            `--window-position=${windowPos.x},${windowPos.y}`
-        ],
-        defaultViewport: { width: 370, height: 950 }
-    });
-    
+
     try {
         const email = generateEmail();
         const firstName = faker.person.firstName();
@@ -1042,7 +1013,7 @@ async function signupAndVerify() {
         console.log(`[B-${browserId}] 🚀 SIGNUP + VERIFY: ${email}`);
         console.log(`[B-${browserId}] 🔗 Unique link assigned`);
         
-        const page = await browser.newPage();
+        page = await browser.newPage();
         
         const userAgent = getRandomUserAgent();
         await page.setUserAgent(userAgent);
@@ -1338,12 +1309,14 @@ async function signupAndVerify() {
         
         // ✅ Return link to pool on error
         returnLinkToPool(browserId, spotifyLink);
-        
+
         return false; // ❌ Link returned to pool
     } finally {
-        try {
-            await browser.close();
-        } catch (e) {}
+        if (page) {
+            try {
+                await page.close();
+            } catch (e) {}
+        }
     }
 }
 
@@ -1449,20 +1422,49 @@ async function main() {
     }
 
     const worker = async (workerId) => {
-        while (totalSuccessful < userAccountTarget && (userMode === 1 || availableLinks.length > 0)) {
-            const result = userMode === 1 ? await signupOnly() : await signupAndVerify();
+        let browser = await launchBrowser(workerId);
 
-            totalAttempts++;
+        try {
+            while (totalSuccessful < userAccountTarget && (userMode === 1 || availableLinks.length > 0)) {
+                try {
+                    if (!browser.isConnected()) {
+                        console.log(`[B-${workerId}] 🔁 Browser disconnected, relaunching...`);
+                        try { await browser.close(); } catch (e) {}
+                        browser = await launchBrowser(workerId);
+                    }
 
-            if (result) {
-                totalSuccessful++;
-                console.log(`🎯 Progress: ${totalSuccessful}/${userAccountTarget} verified accounts`);
+                    const result = userMode === 1
+                        ? await signupOnly(browser, workerId)
+                        : await signupAndVerify(browser, workerId);
+
+                    totalAttempts++;
+
+                    if (result) {
+                        totalSuccessful++;
+                        console.log(`🎯 Progress: ${totalSuccessful}/${userAccountTarget} verified accounts`);
+                    }
+
+                    if (userMode === 2 && availableLinks.length === 0) {
+                        console.log(`📝 Worker #${workerId} stopping - no more links.`);
+                        break;
+                    }
+                } catch (iterationError) {
+                    console.log(`[B-${workerId}] ⚠️ Worker iteration error: ${iterationError.message}`);
+
+                    const browserClosed = !browser.isConnected() || /Target closed/i.test(iterationError.message);
+                    if (browserClosed) {
+                        try { await browser.close(); } catch (e) {}
+                        browser = await launchBrowser(workerId);
+                        console.log(`[B-${workerId}] 🔁 Relaunched browser after termination.`);
+                    }
+
+                    await fastDelay(500);
+                }
             }
-
-            if (userMode === 2 && availableLinks.length === 0) {
-                console.log(`📝 Worker #${workerId} stopping - no more links.`);
-                break;
-            }
+        } finally {
+            try {
+                await browser.close();
+            } catch (e) {}
         }
     };
 
