@@ -155,6 +155,15 @@ async function pageHasAutomatedQueryBlock(page) {
     }
 }
 
+async function captchaRequestsRetry(page) {
+    try {
+        const text = await page.evaluate(() => document.body.textContent.toLowerCase());
+        return text.includes('try again');
+    } catch (error) {
+        return false;
+    }
+}
+
 async function saveUnverifiedAccount(browserId, email, password, page, reason) {
     if (page) {
         const automationBlocked = await pageHasAutomatedQueryBlock(page);
@@ -912,30 +921,43 @@ async function signupOnly(browser, browserId) {
         
         let captchaAttempts = 0;
         const maxCaptchaAttempts = 3;
+        let captchaSolved = false;
 
-        while (captchaAttempts < maxCaptchaAttempts) {
+        while (captchaAttempts < maxCaptchaAttempts && !captchaSolved) {
             const captchaPresent = await page.evaluate(() => {
-                return document.querySelector('iframe[src*="recaptcha"]') || 
+                return document.querySelector('iframe[src*="recaptcha"]') ||
                        document.querySelector('iframe[title*="challenge"]');
             });
 
             if (captchaPresent) {
                 console.log(`[B-${browserId}] 🎯 Captcha detected (${captchaAttempts + 1}/${maxCaptchaAttempts})`);
-                
+
                 const captchaHandled = await handleCaptchaWithBuster(page, browserId, 3);
-                
+
                 if (captchaHandled) {
                     console.log(`[B-${browserId}] ✅ Captcha processed!`);
+                    captchaSolved = true;
                     break;
                 }
             } else {
                 console.log(`[B-${browserId}] ✅ No captcha`);
                 await smartClickContinue(page, browserId);
+                captchaSolved = true;
                 break;
             }
-            
+
+            const retryRequested = await captchaRequestsRetry(page);
+            if (retryRequested) {
+                throw new Error('Captcha requested retry');
+            }
+
             captchaAttempts++;
             await fastDelay(5000);
+        }
+
+        const captchaStillPresent = await page.evaluate(() => document.querySelector('iframe[src*="recaptcha"]') !== null);
+        if (!captchaSolved || captchaStillPresent) {
+            throw new Error('Captcha not solved');
         }
 
         // Wait for signup completion
@@ -944,7 +966,7 @@ async function signupOnly(browser, browserId) {
             await page.waitForFunction(
                 () => {
                     const url = window.location.href;
-                    return (url.includes("spotify.com") && 
+                    return (url.includes("spotify.com") &&
                            !url.includes("signup") &&
                            !url.includes("challenge") &&
                            !url.includes("error")) ||
@@ -955,27 +977,18 @@ async function signupOnly(browser, browserId) {
             );
 
             console.log(`[B-${browserId}] ✅ SIGNUP COMPLETED!`);
-            
+
             const accountData = `${email}:${config.password}\n`;
             await fs.appendFile('spotify.txt', accountData);
             console.log(`[B-${browserId}] 💾 Saved to spotify.txt!`);
             console.log(`📧 ${email}`);
             console.log(`🔐 ${config.password}`);
-            
+
             return true;
 
         } catch (error) {
             console.log(`[B-${browserId}] ❌ Failed: ${error.message}`);
-            
-            try {
-                const accountData = `${email}:${config.password}\n`;
-                await fs.appendFile('spotify.txt', accountData);
-                console.log(`[B-${browserId}] 💾 Saved anyway!`);
-                return true;
-            } catch (saveError) {
-                console.log(`[B-${browserId}] ❌ Save failed`);
-                return false;
-            }
+            return false;
         }
 
     } catch (error) {
@@ -1225,30 +1238,43 @@ async function signupAndVerify(browser, browserId) {
         
         let captchaAttempts = 0;
         const maxCaptchaAttempts = 3;
+        let captchaSolved = false;
 
-        while (captchaAttempts < maxCaptchaAttempts) {
+        while (captchaAttempts < maxCaptchaAttempts && !captchaSolved) {
             const captchaPresent = await page.evaluate(() => {
-                return document.querySelector('iframe[src*="recaptcha"]') || 
+                return document.querySelector('iframe[src*="recaptcha"]') ||
                        document.querySelector('iframe[title*="challenge"]');
             });
 
             if (captchaPresent) {
                 console.log(`[B-${browserId}] 🎯 Captcha detected (${captchaAttempts + 1}/${maxCaptchaAttempts})`);
-                
+
                 const captchaHandled = await handleCaptchaWithBuster(page, browserId, 3);
-                
+
                 if (captchaHandled) {
                     console.log(`[B-${browserId}] ✅ Captcha processed!`);
+                    captchaSolved = true;
                     break;
                 }
             } else {
                 console.log(`[B-${browserId}] ✅ No captcha`);
                 await smartClickContinue(page, browserId);
+                captchaSolved = true;
                 break;
             }
-            
+
+            const retryRequested = await captchaRequestsRetry(page);
+            if (retryRequested) {
+                throw new Error('Captcha requested retry');
+            }
+
             captchaAttempts++;
             await fastDelay(5000);
+        }
+
+        const captchaStillPresent = await page.evaluate(() => document.querySelector('iframe[src*="recaptcha"]') !== null);
+        if (!captchaSolved || captchaStillPresent) {
+            throw new Error('Captcha not solved');
         }
 
         // Wait for signup completion
