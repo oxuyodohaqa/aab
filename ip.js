@@ -74,17 +74,35 @@ function loadColleges() {
 }
 
 // MATCH COLLEGE BY NAME
+function normalizeName(name) {
+    if (!name) return '';
+    // Remove any parenthetical location info and non-alphanumeric separators
+    return name
+        .replace(/\([^)]*\)/g, ' ')
+        .replace(/[^a-zA-Z0-9]+/g, ' ')
+        .trim()
+        .toLowerCase();
+}
+
 function findCollegeByName(collegesMap, schoolName) {
-    const target = schoolName?.trim().toLowerCase();
+    const target = normalizeName(schoolName);
     if (!target) return null;
 
+    let partialMatch = null;
+
     for (const college of collegesMap.values()) {
-        if (college.name?.toLowerCase() === target) {
+        const normalizedCollege = normalizeName(college.name);
+
+        if (normalizedCollege === target) {
             return college;
+        }
+
+        if (!partialMatch && (normalizedCollege.includes(target) || target.includes(normalizedCollege))) {
+            partialMatch = college;
         }
     }
 
-    return null;
+    return partialMatch;
 }
 
 // DEBUG: Get full verification details
