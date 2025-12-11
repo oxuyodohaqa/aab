@@ -30,6 +30,36 @@ const captchaDelay = (ms) => new Promise(resolve => setTimeout(resolve, ms));
 let browserCounter = 0;
 let totalSuccessful = 0;
 let totalAttempts = 0;
+const activeBrowsers = new Map();
+
+const baseViewport = { width: 370, height: 950 };
+
+function buildViewport(browserId) {
+    const widthJitter = Math.floor(Math.random() * 20); // 0-19
+    const heightJitter = Math.floor(Math.random() * 40); // 0-39
+
+    return {
+        width: baseViewport.width + widthJitter,
+        height: baseViewport.height + heightJitter,
+    };
+}
+
+function registerBrowser(browserId, browser) {
+    activeBrowsers.set(browserId, browser);
+}
+
+async function closeTrackedBrowser(browserId) {
+    const browser = activeBrowsers.get(browserId);
+    if (!browser) return;
+
+    activeBrowsers.delete(browserId);
+
+    try {
+        await browser.close();
+    } catch (e) {
+        // Ignore close errors
+    }
+}
 
 // Links management
 let availableLinks = [];
@@ -149,8 +179,8 @@ async function updateLinksFile() {
 
 // Calculate window position
 function getWindowPosition(browserId) {
-    const windowWidth = 370;
-    const windowHeight = 950;
+    const windowWidth = baseViewport.width;
+    const windowHeight = baseViewport.height;
     const margin = 5;
     const browsersPerRow = Math.floor(1920 / (windowWidth + margin));
     
@@ -161,6 +191,38 @@ function getWindowPosition(browserId) {
         x: col * (windowWidth + margin),
         y: row * (windowHeight + 50)
     };
+}
+
+async function launchTrackedBrowser(browserId, extensionPath, windowPos) {
+    const viewport = buildViewport(browserId);
+
+    const browser = await puppeteer.launch({
+        headless: false,
+        ignoreDefaultArgs: ["--enable-automation"],
+        args: [
+            "--no-sandbox",
+            "--disable-setuid-sandbox",
+            "--disable-web-security",
+            "--disable-features=VizDisplayCompositor",
+            "--disable-blink-features=AutomationControlled",
+            "--disable-dev-shm-usage",
+            "--no-first-run",
+            "--disable-default-apps",
+            "--disable-popup-blocking",
+            "--disable-infobars",
+            "--lang=en-US,en",
+            ...(extensionPath ? [
+                `--disable-extensions-except=${extensionPath}`,
+                `--load-extension=${extensionPath}`
+            ] : []),
+            `--window-size=${viewport.width},${viewport.height}`,
+            `--window-position=${windowPos.x},${windowPos.y}`
+        ],
+        defaultViewport: viewport
+    });
+
+    registerBrowser(browserId, browser);
+    return browser;
 }
 
 // COMPLETE COOKIE BLOCKER
@@ -692,6 +754,19 @@ async function clearAndType(page, element, text) {
     await element.type(text, { delay: 30 });
 }
 
+async function saveAccountToFile(fileName, email, password, reason, browserId) {
+    if (!email || !password) return;
+
+    const accountData = `${email}:${password}\n`;
+
+    try {
+        await fs.appendFile(fileName, accountData);
+        console.log(`[B-${browserId}] 💾 Account saved to ${fileName}${reason ? ` (${reason})` : ''}`);
+    } catch (saveError) {
+        console.log(`[B-${browserId}] ❌ Save failed: ${saveError.message}`);
+    }
+}
+
 // SIGNUP ONLY FUNCTION - Saves to spotify.txt
 async function signupOnly() {
     const extensionPath = path.join(__dirname, 'buster');
@@ -705,28 +780,12 @@ async function signupOnly() {
     const browserId = browserCounter;
     const windowPos = getWindowPosition(browserId);
     
-    const browser = await puppeteer.launch({
-        headless: false,
-        args: [
-            "--no-sandbox",
-            "--disable-setuid-sandbox",
-            "--disable-web-security",
-            "--disable-features=VizDisplayCompositor",
-            "--disable-blink-features=AutomationControlled",
-            "--disable-dev-shm-usage",
-            "--no-first-run",
-            "--disable-default-apps",
-            "--disable-popup-blocking",
-            `--disable-extensions-except=${extensionPath}`,
-            `--load-extension=${extensionPath}`,
-            `--window-size=370,950`,
-            `--window-position=${windowPos.x},${windowPos.y}`
-        ],
-        defaultViewport: { width: 370, height: 950 }
-    });
+    const browser = await launchTrackedBrowser(browserId, extensionPath, windowPos);
     
+    let email;
+
     try {
-        const email = generateEmail();
+        email = generateEmail();
         const firstName = faker.person.firstName();
         const lastName = faker.person.lastName();
         const displayName = `${firstName} ${lastName}`;
@@ -1013,15 +1072,15 @@ async function signupOnly() {
     } catch (error) {
         if (error.message === 'CAPTCHA_THROTTLED') {
             console.log(`[B-${browserId}] 🛑 Captcha throttled - closing browser and moving to next task`);
+            await saveAccountToFile('unverified.txt', email, config.password, 'captcha throttled', browserId);
         } else {
             console.log(`[B-${browserId}] ❌ Error: ${error.message}`);
+            await saveAccountToFile('unverified.txt', email, config.password, 'error before completion', browserId);
         }
 
         return false;
     } finally {
-        try {
-            await browser.close();
-        } catch (e) {}
+        await closeTrackedBrowser(browserId);
     }
 }
 
@@ -1050,28 +1109,12 @@ async function signupAndVerify() {
     
     const windowPos = getWindowPosition(browserId);
     
-    const browser = await puppeteer.launch({
-        headless: false,
-        args: [
-            "--no-sandbox",
-            "--disable-setuid-sandbox",
-            "--disable-web-security",
-            "--disable-features=VizDisplayCompositor",
-            "--disable-blink-features=AutomationControlled",
-            "--disable-dev-shm-usage",
-            "--no-first-run",
-            "--disable-default-apps",
-            "--disable-popup-blocking",
-            `--disable-extensions-except=${extensionPath}`,
-            `--load-extension=${extensionPath}`,
-            `--window-size=370,950`,
-            `--window-position=${windowPos.x},${windowPos.y}`
-        ],
-        defaultViewport: { width: 370, height: 950 }
-    });
+    const browser = await launchTrackedBrowser(browserId, extensionPath, windowPos);
     
+    let email;
+
     try {
-        const email = generateEmail();
+        email = generateEmail();
         const firstName = faker.person.firstName();
         const lastName = faker.person.lastName();
         const displayName = `${firstName} ${lastName}`;
@@ -1373,8 +1416,10 @@ async function signupAndVerify() {
     } catch (error) {
         if (error.message === 'CAPTCHA_THROTTLED') {
             console.log(`[B-${browserId}] 🛑 Captcha throttled - closing browser and continuing with next account`);
+            await saveAccountToFile('unverified.txt', email, config.password, 'captcha throttled', browserId);
         } else {
             console.log(`[B-${browserId}] ❌ Error: ${error.message}`);
+            await saveAccountToFile('unverified.txt', email, config.password, 'error before verification', browserId);
         }
 
         // ✅ Return link to pool on error
@@ -1382,9 +1427,7 @@ async function signupAndVerify() {
 
         return false; // ❌ Link returned to pool
     } finally {
-        try {
-            await browser.close();
-        } catch (e) {}
+        await closeTrackedBrowser(browserId);
     }
 }
 
@@ -1570,7 +1613,14 @@ async function main() {
 process.on('SIGINT', async () => {
     console.log('\n🛑 Shutting down...');
     console.log(`✅ Total verified: ${totalSuccessful || 0}`);
-    
+
+    if (activeBrowsers.size > 0) {
+        console.log(`🧹 Closing ${activeBrowsers.size} active browser(s)...`);
+        for (const browserId of Array.from(activeBrowsers.keys())) {
+            await closeTrackedBrowser(browserId);
+        }
+    }
+
     if (userMode === 2) {
         console.log(`📋 Links used: ${usedLinks.length}`);
         console.log(`📋 Links remaining: ${availableLinks.length}`);
