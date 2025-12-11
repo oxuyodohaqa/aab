@@ -147,37 +147,11 @@ async function updateLinksFile() {
 
 async function pageHasAutomatedQueryBlock(page) {
     try {
-        const frames = page.frames();
-
-        for (const frame of frames) {
-            try {
-                if (frame.isDetached()) {
-                    continue;
-                }
-
-                const text = await frame.evaluate(() => document.body.textContent.toLowerCase());
-                if (
-                    text.includes('your computer or network may be sending automated queries') ||
-                    text.includes('try again later')
-                ) {
-                    return true;
-                }
-            } catch (error) {
-                continue;
-            }
-        }
-
-        return false;
+        const text = await page.evaluate(() => document.body.textContent.toLowerCase());
+        return text.includes('your computer or network may be sending automated queries') ||
+               text.includes('try again later');
     } catch (error) {
         return false;
-    }
-}
-
-async function assertNotAutomationBlocked(page, browserId, context) {
-    const automationBlocked = await pageHasAutomatedQueryBlock(page);
-    if (automationBlocked) {
-        console.log(`[B-${browserId}] ⛔ Automated query block detected during ${context} - restarting browser`);
-        throw new Error('Automated query block page');
     }
 }
 
@@ -385,8 +359,9 @@ async function solveCaptchaWithBuster(page, browserId, attempt) {
             await smartClickContinue(page, browserId, 10);
         }
         
+        let challengeFrame;
         try {
-            await page.waitForSelector(
+            challengeFrame = await page.waitForSelector(
                 'iframe[title*="recaptcha challenge"], iframe[src*="recaptcha/api2/bframe"]',
                 { timeout: 6000, visible: true }
             );
@@ -395,26 +370,16 @@ async function solveCaptchaWithBuster(page, browserId, attempt) {
             await smartClickContinue(page, browserId, 10);
             return false;
         }
-
+        
+        if (!challengeFrame) return false;
+        
+        const challengeFrameContent = await challengeFrame.contentFrame();
+        if (!challengeFrameContent) return false;
+        
         for (let busterAttempt = 1; busterAttempt <= 3; busterAttempt++) {
             try {
                 console.log(`[B-${browserId}] 🎯 Buster attempt ${busterAttempt}/3`);
-
-                const challengeFrameHandle = await page.$(
-                    'iframe[title*="recaptcha challenge"], iframe[src*="recaptcha/api2/bframe"]'
-                );
-
-                if (!challengeFrameHandle) {
-                    console.log(`[B-${browserId}] ⚠️ Challenge frame missing`);
-                    return false;
-                }
-
-                const challengeFrameContent = await challengeFrameHandle.contentFrame();
-                if (!challengeFrameContent || challengeFrameContent.isDetached()) {
-                    console.log(`[B-${browserId}] ⚠️ Challenge frame detached`);
-                    return false;
-                }
-
+                
                 const helpButton = await challengeFrameContent.$(".button-holder.help-button-holder, .help-button-holder");
                 if (helpButton) {
                     await helpButton.click();
@@ -470,12 +435,11 @@ async function solveCaptchaWithBuster(page, browserId, attempt) {
 // ENHANCED CAPTCHA HANDLER WITH MULTIPLE CONTINUE ATTEMPTS
 async function handleCaptchaWithBuster(page, browserId, maxRetries = 5) {
     let retryCount = 0;
-
+    
     while (retryCount < maxRetries) {
         try {
-            await assertNotAutomationBlocked(page, browserId, 'captcha handling');
             console.log(`[B-${browserId}] 🤖 Captcha attempt ${retryCount + 1}/${maxRetries}`);
-
+            
             // Check if captcha is still present
             const captchaPresent = await page.evaluate(() => {
                 return document.querySelector('iframe[src*="recaptcha"]') !== null;
@@ -512,8 +476,6 @@ async function handleCaptchaWithBuster(page, browserId, maxRetries = 5) {
                 }
             }
 
-            await assertNotAutomationBlocked(page, browserId, 'captcha handling');
-
             retryCount++;
             if (retryCount < maxRetries) {
                 console.log(`[B-${browserId}] ⏳ Retry ${retryCount + 1} in 1.5 seconds...`);
@@ -540,13 +502,11 @@ async function verifyStudentAccount(page, browserId, verificationUrl, email, pas
         console.log(`[B-${browserId}] 🎓 Starting student verification process...`);
         console.log(`[B-${browserId}] 🔗 Verification URL: ${verificationUrl.substring(0, 60)}...`);
         
-        await page.goto(verificationUrl, {
+        await page.goto(verificationUrl, { 
             waitUntil: "domcontentloaded",
-            timeout: 30000
+            timeout: 30000 
         });
-
-        await assertNotAutomationBlocked(page, browserId, 'verification page load');
-
+        
         await fastDelay(5000);
         
 const isConfirmationPage = await page.evaluate(() => {
@@ -751,15 +711,13 @@ async function signupOnly(browser, browserId) {
         }, browserId);
         
         await blockAllCookies(page, browserId);
-
+        
         console.log(`[B-${browserId}] 📱 Loading signup...`);
-        await page.goto('https://www.spotify.com/signup', {
+        await page.goto('https://www.spotify.com/signup', { 
             waitUntil: "domcontentloaded",
-            timeout: 20000
+            timeout: 20000 
         });
-
-        await assertNotAutomationBlocked(page, browserId, 'signup page load');
-
+        
         await fastDelay(2000);
 
         // Email step
@@ -1068,13 +1026,11 @@ async function signupAndVerify(browser, browserId) {
         await blockAllCookies(page, browserId);
         
         console.log(`[B-${browserId}] 📱 Loading signup...`);
-        await page.goto('https://www.spotify.com/signup', {
+        await page.goto('https://www.spotify.com/signup', { 
             waitUntil: "domcontentloaded",
-            timeout: 20000
+            timeout: 20000 
         });
-
-        await assertNotAutomationBlocked(page, browserId, 'signup page load');
-
+        
         await fastDelay(2000);
 
         // Email step
