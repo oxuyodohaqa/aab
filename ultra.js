@@ -151,6 +151,10 @@ async function pageHasAutomatedQueryBlock(page) {
 
         for (const frame of frames) {
             try {
+                if (frame.isDetached()) {
+                    continue;
+                }
+
                 const text = await frame.evaluate(() => document.body.textContent.toLowerCase());
                 if (
                     text.includes('your computer or network may be sending automated queries') ||
@@ -381,9 +385,8 @@ async function solveCaptchaWithBuster(page, browserId, attempt) {
             await smartClickContinue(page, browserId, 10);
         }
         
-        let challengeFrame;
         try {
-            challengeFrame = await page.waitForSelector(
+            await page.waitForSelector(
                 'iframe[title*="recaptcha challenge"], iframe[src*="recaptcha/api2/bframe"]',
                 { timeout: 6000, visible: true }
             );
@@ -392,16 +395,26 @@ async function solveCaptchaWithBuster(page, browserId, attempt) {
             await smartClickContinue(page, browserId, 10);
             return false;
         }
-        
-        if (!challengeFrame) return false;
-        
-        const challengeFrameContent = await challengeFrame.contentFrame();
-        if (!challengeFrameContent) return false;
-        
+
         for (let busterAttempt = 1; busterAttempt <= 3; busterAttempt++) {
             try {
                 console.log(`[B-${browserId}] 🎯 Buster attempt ${busterAttempt}/3`);
-                
+
+                const challengeFrameHandle = await page.$(
+                    'iframe[title*="recaptcha challenge"], iframe[src*="recaptcha/api2/bframe"]'
+                );
+
+                if (!challengeFrameHandle) {
+                    console.log(`[B-${browserId}] ⚠️ Challenge frame missing`);
+                    return false;
+                }
+
+                const challengeFrameContent = await challengeFrameHandle.contentFrame();
+                if (!challengeFrameContent || challengeFrameContent.isDetached()) {
+                    console.log(`[B-${browserId}] ⚠️ Challenge frame detached`);
+                    return false;
+                }
+
                 const helpButton = await challengeFrameContent.$(".button-holder.help-button-holder, .help-button-holder");
                 if (helpButton) {
                     await helpButton.click();
