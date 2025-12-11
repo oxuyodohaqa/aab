@@ -616,6 +616,32 @@ const isConfirmationPage = await page.evaluate(() => {
         
         console.log(`[B-${browserId}] ✅ Student confirmation page detected!`);
         
+        // Quick pass: some links immediately show a "you're verified" page without a confirm button
+        const immediateSuccess = await page.evaluate(() => {
+            const pageText = document.body.textContent.toLowerCase();
+            const url = window.location.href;
+
+            const successIndicators = [
+                "you're verified as a student", "student status is verified",
+                "you are verified", "verified as a student", "you're verified",
+                "verification complete", "discount activated", "student discount confirmed"
+            ];
+
+            return successIndicators.some(indicator => pageText.includes(indicator)) ||
+                   url.includes('success') || url.includes('verified') || url.includes('complete');
+        });
+
+        if (immediateSuccess) {
+            console.log(`[B-${browserId}] ✅ Already verified message detected - skipping confirm click`);
+
+            const accountData = `${email}:${password}\n`;
+            await fs.appendFile('verifiedstudent.txt', accountData);
+            console.log(`[B-${browserId}] 💾 Account saved to verifiedstudent.txt!`);
+
+            await fastDelay(2000);
+            return true;
+        }
+
         let confirmClicked = false;
         
         try {
@@ -688,23 +714,25 @@ if (confirmTexts.some(confirmText => text === confirmText || text.includes(confi
         console.log(`[B-${browserId}] ⏳ Waiting for verification message...`);
         
         try {
-await page.waitForFunction(() => {
-    const pageText = document.body.textContent.toLowerCase();
-    const url = window.location.href;
-    
-    // Multi-language success indicators
-    const successIndicators = [
-        'verified', 'you\'re verified', 'student status is verified',
-        'verification successful', 'verification complete', 'confirmed',
-        'success', 'complete', 'discount activated', 'student discount confirmed',
-        'congratulations', 'úspěch', 'successo', 'éxito', 'erfolg', '成功'
-    ];
-    
-    return successIndicators.some(indicator => pageText.includes(indicator)) ||
-           url.includes('success') || url.includes('complete') || 
-           url.includes('verified') || url.includes('successo') ||
-           url.includes('úspěch') || url.includes('éxito');
-}, { timeout: 45000 });
+            await page.waitForFunction(() => {
+                const pageText = document.body.textContent.toLowerCase();
+                const url = window.location.href;
+
+                // Multi-language success indicators (expanded for post-verify landing)
+                const successIndicators = [
+                    'verified', "you're verified", "you're verified as a student",
+                    'verified as a student', 'student status is verified',
+                    'verification successful', 'verification complete', 'confirmed',
+                    'success', 'complete', 'discount activated', 'student discount confirmed',
+                    'congratulations', 'úspěch', 'successo', 'éxito', 'erfolg', '成功',
+                    'choose your plan'
+                ];
+
+                return successIndicators.some(indicator => pageText.includes(indicator)) ||
+                       url.includes('success') || url.includes('complete') ||
+                       url.includes('verified') || url.includes('successo') ||
+                       url.includes('úspěch') || url.includes('éxito');
+            }, { timeout: 45000 });
             
             console.log(`[B-${browserId}] ✅ VERIFICATION MESSAGE DETECTED!`);
             console.log(`[B-${browserId}] 🎉 STUDENT VERIFICATION COMPLETED!`);
