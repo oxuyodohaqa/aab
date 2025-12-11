@@ -14,7 +14,7 @@ const CONFIG = {
 };
 
 if (!CONFIG.collegesFile) {
-    CONFIG.collegesFile = 'sheerid_ph.json';
+    CONFIG.collegesFile = 'sheerid_us.json';
 }
 
 // Create readline interface
