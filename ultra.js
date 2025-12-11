@@ -30,6 +30,36 @@ const captchaDelay = (ms) => new Promise(resolve => setTimeout(resolve, ms));
 let browserCounter = 0;
 let totalSuccessful = 0;
 let totalAttempts = 0;
+const activeBrowsers = new Map();
+
+const baseViewport = { width: 370, height: 950 };
+
+function buildViewport(browserId) {
+    const widthJitter = Math.floor(Math.random() * 20); // 0-19
+    const heightJitter = Math.floor(Math.random() * 40); // 0-39
+
+    return {
+        width: baseViewport.width + widthJitter,
+        height: baseViewport.height + heightJitter,
+    };
+}
+
+function registerBrowser(browserId, browser) {
+    activeBrowsers.set(browserId, browser);
+}
+
+async function closeTrackedBrowser(browserId) {
+    const browser = activeBrowsers.get(browserId);
+    if (!browser) return;
+
+    activeBrowsers.delete(browserId);
+
+    try {
+        await browser.close();
+    } catch (e) {
+        // Ignore close errors
+    }
+}
 
 // Links management
 let availableLinks = [];
@@ -149,8 +179,8 @@ async function updateLinksFile() {
 
 // Calculate window position
 function getWindowPosition(browserId) {
-    const windowWidth = 370;
-    const windowHeight = 950;
+    const windowWidth = baseViewport.width;
+    const windowHeight = baseViewport.height;
     const margin = 5;
     const browsersPerRow = Math.floor(1920 / (windowWidth + margin));
     
@@ -161,6 +191,38 @@ function getWindowPosition(browserId) {
         x: col * (windowWidth + margin),
         y: row * (windowHeight + 50)
     };
+}
+
+async function launchTrackedBrowser(browserId, extensionPath, windowPos) {
+    const viewport = buildViewport(browserId);
+
+    const browser = await puppeteer.launch({
+        headless: false,
+        ignoreDefaultArgs: ["--enable-automation"],
+        args: [
+            "--no-sandbox",
+            "--disable-setuid-sandbox",
+            "--disable-web-security",
+            "--disable-features=VizDisplayCompositor",
+            "--disable-blink-features=AutomationControlled",
+            "--disable-dev-shm-usage",
+            "--no-first-run",
+            "--disable-default-apps",
+            "--disable-popup-blocking",
+            "--disable-infobars",
+            "--lang=en-US,en",
+            ...(extensionPath ? [
+                `--disable-extensions-except=${extensionPath}`,
+                `--load-extension=${extensionPath}`
+            ] : []),
+            `--window-size=${viewport.width},${viewport.height}`,
+            `--window-position=${windowPos.x},${windowPos.y}`
+        ],
+        defaultViewport: viewport
+    });
+
+    registerBrowser(browserId, browser);
+    return browser;
 }
 
 // COMPLETE COOKIE BLOCKER
@@ -289,6 +351,35 @@ async function smartClickContinue(page, browserId, attempts = 6) {
     }
 }
 
+// Detect Google throttling/blocking message during captcha solving
+async function checkCaptchaThrottling(page, browserId) {
+    const frames = page.frames();
+    const throttlingIndicators = [
+        'try again later',
+        'automated queries'
+    ];
+
+    for (const frame of frames) {
+        try {
+            const text = await frame.evaluate(() => {
+                const body = document.body;
+                return body ? body.innerText.toLowerCase() : '';
+            });
+
+            const throttled = throttlingIndicators.every(indicator => text.includes(indicator));
+            if (throttled) {
+                console.log(`[B-${browserId}] 🛑 Captcha blocked with 'Try again later' message (frame ${frame.name() || 'recaptcha'})`);
+                return true;
+            }
+        } catch (e) {
+            // Ignore cross-origin frames that cannot be read
+            continue;
+        }
+    }
+
+    return false;
+}
+
 // ENHANCED BUSTER CAPTCHA SOLVER
 async function solveCaptchaWithBuster(page, browserId, attempt) {
     try {
@@ -412,11 +503,15 @@ async function solveCaptchaWithBuster(page, browserId, attempt) {
 // ENHANCED CAPTCHA HANDLER WITH MULTIPLE CONTINUE ATTEMPTS
 async function handleCaptchaWithBuster(page, browserId, maxRetries = 5) {
     let retryCount = 0;
-    
+
     while (retryCount < maxRetries) {
         try {
+            if (await checkCaptchaThrottling(page, browserId)) {
+                throw new Error('CAPTCHA_THROTTLED');
+            }
+
             console.log(`[B-${browserId}] 🤖 Captcha attempt ${retryCount + 1}/${maxRetries}`);
-            
+
             // Check if captcha is still present
             const captchaPresent = await page.evaluate(() => {
                 return document.querySelector('iframe[src*="recaptcha"]') !== null;
@@ -424,13 +519,13 @@ async function handleCaptchaWithBuster(page, browserId, maxRetries = 5) {
             
             if (!captchaPresent) {
                 console.log(`[B-${browserId}] ✅ No captcha detected`);
-                
+
                 // Try to click continue anyway
                 await smartClickContinue(page, browserId);
-                
+
                 return true;
             }
-            
+
             const captchaSolved = await solveCaptchaWithBuster(page, browserId, retryCount);
 
             if (captchaSolved) {
@@ -451,6 +546,8 @@ async function handleCaptchaWithBuster(page, browserId, maxRetries = 5) {
                     await smartClickContinue(page, browserId);
                     await fastDelay(800);
                 }
+            } else if (await checkCaptchaThrottling(page, browserId)) {
+                throw new Error('CAPTCHA_THROTTLED');
             }
 
             retryCount++;
@@ -461,6 +558,11 @@ async function handleCaptchaWithBuster(page, browserId, maxRetries = 5) {
             
         } catch (error) {
             console.log(`[B-${browserId}] ⚠️ Attempt ${retryCount + 1} error: ${error.message}`);
+
+            if (error.message === 'CAPTCHA_THROTTLED') {
+                throw error;
+            }
+
             retryCount++;
             await fastDelay(2000);
         }
@@ -479,12 +581,12 @@ async function verifyStudentAccount(page, browserId, verificationUrl, email, pas
         console.log(`[B-${browserId}] 🎓 Starting student verification process...`);
         console.log(`[B-${browserId}] 🔗 Verification URL: ${verificationUrl.substring(0, 60)}...`);
         
-        await page.goto(verificationUrl, { 
+        await page.goto(verificationUrl, {
             waitUntil: "domcontentloaded",
-            timeout: 30000 
+            timeout: 30000
         });
-        
-        await fastDelay(5000);
+
+        await fastDelay(1000);
         
 const isConfirmationPage = await page.evaluate(() => {
     const url = window.location.href;
@@ -652,6 +754,19 @@ async function clearAndType(page, element, text) {
     await element.type(text, { delay: 30 });
 }
 
+async function saveAccountToFile(fileName, email, password, reason, browserId) {
+    if (!email || !password) return;
+
+    const accountData = `${email}:${password}\n`;
+
+    try {
+        await fs.appendFile(fileName, accountData);
+        console.log(`[B-${browserId}] 💾 Account saved to ${fileName}${reason ? ` (${reason})` : ''}`);
+    } catch (saveError) {
+        console.log(`[B-${browserId}] ❌ Save failed: ${saveError.message}`);
+    }
+}
+
 // SIGNUP ONLY FUNCTION - Saves to spotify.txt
 async function signupOnly() {
     const extensionPath = path.join(__dirname, 'buster');
@@ -665,28 +780,12 @@ async function signupOnly() {
     const browserId = browserCounter;
     const windowPos = getWindowPosition(browserId);
     
-    const browser = await puppeteer.launch({
-        headless: false,
-        args: [
-            "--no-sandbox",
-            "--disable-setuid-sandbox",
-            "--disable-web-security",
-            "--disable-features=VizDisplayCompositor",
-            "--disable-blink-features=AutomationControlled",
-            "--disable-dev-shm-usage",
-            "--no-first-run",
-            "--disable-default-apps",
-            "--disable-popup-blocking",
-            `--disable-extensions-except=${extensionPath}`,
-            `--load-extension=${extensionPath}`,
-            `--window-size=370,950`,
-            `--window-position=${windowPos.x},${windowPos.y}`
-        ],
-        defaultViewport: { width: 370, height: 950 }
-    });
+    const browser = await launchTrackedBrowser(browserId, extensionPath, windowPos);
     
+    let email;
+
     try {
-        const email = generateEmail();
+        email = generateEmail();
         const firstName = faker.person.firstName();
         const lastName = faker.person.lastName();
         const displayName = `${firstName} ${lastName}`;
@@ -927,7 +1026,7 @@ async function signupOnly() {
             }
             
             captchaAttempts++;
-            await fastDelay(5000);
+            await fastDelay(1000);
         }
 
         // Wait for signup completion
@@ -971,12 +1070,17 @@ async function signupOnly() {
         }
 
     } catch (error) {
-        console.log(`[B-${browserId}] ❌ Error: ${error.message}`);
+        if (error.message === 'CAPTCHA_THROTTLED') {
+            console.log(`[B-${browserId}] 🛑 Captcha throttled - closing browser and moving to next task`);
+            await saveAccountToFile('unverified.txt', email, config.password, 'captcha throttled', browserId);
+        } else {
+            console.log(`[B-${browserId}] ❌ Error: ${error.message}`);
+            await saveAccountToFile('unverified.txt', email, config.password, 'error before completion', browserId);
+        }
+
         return false;
     } finally {
-        try {
-            await browser.close();
-        } catch (e) {}
+        await closeTrackedBrowser(browserId);
     }
 }
 
@@ -1005,28 +1109,12 @@ async function signupAndVerify() {
     
     const windowPos = getWindowPosition(browserId);
     
-    const browser = await puppeteer.launch({
-        headless: false,
-        args: [
-            "--no-sandbox",
-            "--disable-setuid-sandbox",
-            "--disable-web-security",
-            "--disable-features=VizDisplayCompositor",
-            "--disable-blink-features=AutomationControlled",
-            "--disable-dev-shm-usage",
-            "--no-first-run",
-            "--disable-default-apps",
-            "--disable-popup-blocking",
-            `--disable-extensions-except=${extensionPath}`,
-            `--load-extension=${extensionPath}`,
-            `--window-size=370,950`,
-            `--window-position=${windowPos.x},${windowPos.y}`
-        ],
-        defaultViewport: { width: 370, height: 950 }
-    });
+    const browser = await launchTrackedBrowser(browserId, extensionPath, windowPos);
     
+    let email;
+
     try {
-        const email = generateEmail();
+        email = generateEmail();
         const firstName = faker.person.firstName();
         const lastName = faker.person.lastName();
         const displayName = `${firstName} ${lastName}`;
@@ -1268,7 +1356,7 @@ async function signupAndVerify() {
             }
             
             captchaAttempts++;
-            await fastDelay(5000);
+            await fastDelay(1000);
         }
 
         // Wait for signup completion
@@ -1326,16 +1414,20 @@ async function signupAndVerify() {
         }
 
     } catch (error) {
-        console.log(`[B-${browserId}] ❌ Error: ${error.message}`);
-        
+        if (error.message === 'CAPTCHA_THROTTLED') {
+            console.log(`[B-${browserId}] 🛑 Captcha throttled - closing browser and continuing with next account`);
+            await saveAccountToFile('unverified.txt', email, config.password, 'captcha throttled', browserId);
+        } else {
+            console.log(`[B-${browserId}] ❌ Error: ${error.message}`);
+            await saveAccountToFile('unverified.txt', email, config.password, 'error before verification', browserId);
+        }
+
         // ✅ Return link to pool on error
         returnLinkToPool(browserId, spotifyLink);
-        
+
         return false; // ❌ Link returned to pool
     } finally {
-        try {
-            await browser.close();
-        } catch (e) {}
+        await closeTrackedBrowser(browserId);
     }
 }
 
@@ -1501,9 +1593,7 @@ async function main() {
         
         batchCounter++;
         
-        const waitTime = 5000;
-        console.log(`\n⏳ Next batch in ${waitTime/1000}s...`);
-        await delay(waitTime);
+        console.log(`\n⏩ Starting next batch immediately...`);
     }
     
     console.log(`\n🏁 === FINAL RESULTS ===`);
@@ -1523,7 +1613,14 @@ async function main() {
 process.on('SIGINT', async () => {
     console.log('\n🛑 Shutting down...');
     console.log(`✅ Total verified: ${totalSuccessful || 0}`);
-    
+
+    if (activeBrowsers.size > 0) {
+        console.log(`🧹 Closing ${activeBrowsers.size} active browser(s)...`);
+        for (const browserId of Array.from(activeBrowsers.keys())) {
+            await closeTrackedBrowser(browserId);
+        }
+    }
+
     if (userMode === 2) {
         console.log(`📋 Links used: ${usedLinks.length}`);
         console.log(`📋 Links remaining: ${availableLinks.length}`);
