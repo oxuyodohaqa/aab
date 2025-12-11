@@ -274,6 +274,61 @@ async function blockAllCookies(page, browserId) {
     }
 }
 
+// Block popups, dialogs, and extra tabs opened from the active page
+function attachPopupBlocker(page, browserId) {
+    const browser = page.browser();
+    const parentTarget = page.target();
+
+    const dialogHandler = async (dialog) => {
+        try {
+            console.log(`[B-${browserId}] 🚫 Dismissing dialog: ${dialog.message()}`);
+            await dialog.dismiss();
+        } catch (error) {
+            console.log(`[B-${browserId}] ⚠️ Dialog dismiss error: ${error.message}`);
+        }
+    };
+
+    const popupHandler = async (popupPage) => {
+        try {
+            console.log(`[B-${browserId}] 🚫 Closing popup page: ${popupPage.url()}`);
+            await popupPage.close();
+        } catch (error) {
+            console.log(`[B-${browserId}] ⚠️ Popup close error: ${error.message}`);
+        }
+    };
+
+    const targetHandler = async (target) => {
+        try {
+            if (target.type() !== 'page') return;
+
+            const opener = target.opener();
+            if (!opener || opener._targetId !== parentTarget._targetId) return;
+
+            const popupPage = await target.page();
+            if (!popupPage) return;
+
+            console.log(`[B-${browserId}] 🚫 Closing new tab: ${target.url() || 'about:blank'}`);
+            await popupPage.close();
+        } catch (error) {
+            console.log(`[B-${browserId}] ⚠️ Target close error: ${error.message}`);
+        }
+    };
+
+    page.on('dialog', dialogHandler);
+    page.on('popup', popupHandler);
+    browser.on('targetcreated', targetHandler);
+
+    const cleanup = () => {
+        page.removeListener('dialog', dialogHandler);
+        page.removeListener('popup', popupHandler);
+        browser.removeListener('targetcreated', targetHandler);
+    };
+
+    page.once('close', cleanup);
+
+    return cleanup;
+}
+
 // Smart Continue button clicker - works even with captcha present
 async function smartClickContinue(page, browserId, attempts = 6) {
     try {
@@ -577,6 +632,129 @@ async function handleCaptchaWithBuster(page, browserId, maxRetries = 5) {
 
 // ✅ STRICT STUDENT VERIFICATION - ONLY RETURNS TRUE ON ACTUAL SUCCESS
 async function verifyStudentAccount(page, browserId, verificationUrl, email, password) {
+    async function clickFirstVisibleButton() {
+        try {
+            return await page.evaluate(() => {
+                const candidates = [
+                    'button',
+                    'a[role="button"]',
+                    'div[role="button"]'
+                ];
+
+                for (const selector of candidates) {
+                    const elements = Array.from(document.querySelectorAll(selector));
+
+                    for (const element of elements) {
+                        const rect = element.getBoundingClientRect();
+                        const style = window.getComputedStyle(element);
+                        const visible = rect.width > 0 && rect.height > 0 && style.display !== 'none' && style.visibility !== 'hidden';
+
+                        if (!visible) continue;
+
+                        try {
+                            element.click();
+                            return true;
+                        } catch (err) {
+                            continue;
+                        }
+                    }
+                }
+
+                return false;
+            });
+        } catch (error) {
+            console.log(`[B-${browserId}] ❌ Fallback button click failed: ${error.message}`);
+            return false;
+        }
+    }
+
+    async function clickConfirmButtonOnce() {
+        try {
+            return await page.evaluate(() => {
+                const spotifySelectors = [
+                    '.ButtonInner-sc-14ud5tc-0',
+                    '.encore-bright-accent-set',
+                    'span[class*="ButtonInner"]',
+                    'button',
+                    'a[role="button"]'
+                ];
+
+                const confirmTexts = [
+                    'confirm', 'bevestigen', 'potvrdit', 'confirmer', 'bestätigen',
+                    '确认', 'bevestig', 'confirma', 'confirmar', 'onayla', '確認',
+                    'continue', 'accept', 'activate'
+                ];
+
+                for (const selector of spotifySelectors) {
+                    const elements = document.querySelectorAll(selector);
+                    for (const element of elements) {
+                        const text = (element.textContent || element.innerText || '').trim().toLowerCase();
+
+                        if (!confirmTexts.some(confirmText => text === confirmText || text.includes(confirmText))) continue;
+
+                        const style = window.getComputedStyle(element);
+                        const rect = element.getBoundingClientRect();
+
+                        if (rect.width > 0 && rect.height > 0 && style.display !== 'none' && style.visibility !== 'hidden') {
+                            try {
+                                const parentButton = element.closest('button');
+                                if (parentButton) {
+                                    parentButton.click();
+                                } else {
+                                    element.click();
+                                }
+                                return true;
+                            } catch (e) {
+                                continue;
+                            }
+                        }
+                    }
+                }
+
+                return false;
+            });
+        } catch (error) {
+            console.log(`[B-${browserId}] ❌ Confirm click attempt failed: ${error.message}`);
+            return false;
+        }
+    }
+
+    async function clickConfirmButtonWithRetries() {
+        const maxAttempts = 6;
+
+        for (let attempt = 1; attempt <= maxAttempts; attempt++) {
+            const clicked = await clickConfirmButtonOnce();
+
+            if (clicked) {
+                console.log(`[B-${browserId}] ✅ Confirm button clicked on attempt ${attempt}`);
+                return true;
+            }
+
+            console.log(`[B-${browserId}] ⏳ Confirm button not ready (attempt ${attempt}/${maxAttempts}) - waiting...`);
+            await fastDelay(1200);
+        }
+
+        return false;
+    }
+
+    async function clickGenericVisibleButtonWithRetries() {
+        const maxAttempts = 3;
+
+        for (let attempt = 1; attempt <= maxAttempts; attempt++) {
+            const clicked = await clickFirstVisibleButton();
+
+            if (clicked) {
+                console.log(`[B-${browserId}] ✅ Generic button clicked on attempt ${attempt}`);
+                return true;
+            }
+
+            console.log(`[B-${browserId}] ⏳ No generic button found (attempt ${attempt}/${maxAttempts}) - retrying...`);
+            await fastDelay(800);
+        }
+
+        return false;
+    }
+
     try {
         console.log(`[B-${browserId}] 🎓 Starting student verification process...`);
         console.log(`[B-${browserId}] 🔗 Verification URL: ${verificationUrl.substring(0, 60)}...`);
@@ -588,20 +766,20 @@ async function verifyStudentAccount(page, browserId, verificationUrl, email, pas
 
         await fastDelay(1000);
         
-const isConfirmationPage = await page.evaluate(() => {
-    const url = window.location.href;
-    const pageText = document.body.textContent.toLowerCase();
-    
-    // Multi-language confirmation page detection
-    const confirmationIndicators = [
-        'confirm your account', 'confirm', 'verification', 'bevestigen',
-        'student discount', 'verify', 'potvrdit', 'confirmer', 'bestätigen',
-        '确认', 'bevestig', 'confirma', 'confirmar', 'onayla', '確認'
-    ];
-    
-    return (url.includes('student') && url.includes('apply')) ||
-           confirmationIndicators.some(indicator => pageText.includes(indicator));
-});
+        const isConfirmationPage = await page.evaluate(() => {
+            const url = window.location.href;
+            const pageText = document.body.textContent.toLowerCase();
+
+            // Multi-language confirmation page detection
+            const confirmationIndicators = [
+                'confirm your account', 'confirm', 'verification', 'bevestigen',
+                'student discount', 'verify', 'potvrdit', 'confirmer', 'bestätigen',
+                '确认', 'bevestig', 'confirma', 'confirmar', 'onayla', '確認'
+            ];
+
+            return (url.includes('student') && url.includes('apply')) ||
+                   confirmationIndicators.some(indicator => pageText.includes(indicator));
+        });
         
         if (!isConfirmationPage) {
             console.log(`[B-${browserId}] ❌ NOT a confirmation page - verification FAILED`);
@@ -642,72 +820,24 @@ const isConfirmationPage = await page.evaluate(() => {
             return true;
         }
 
-        let confirmClicked = false;
-        
-        try {
-            console.log(`[B-${browserId}] 🎯 Looking for Confirm button...`);
-            
-            confirmClicked = await page.evaluate(() => {
-                const spotifySelectors = [
-                    '.ButtonInner-sc-14ud5tc-0',
-                    '.encore-bright-accent-set',
-                    'span[class*="ButtonInner"]',
-                    'button'
-                ];
-                
-                for (const selector of spotifySelectors) {
-                    const elements = document.querySelectorAll(selector);
-                    for (const element of elements) {
-                        const text = (element.textContent || element.innerText || '').trim().toLowerCase();
-                        // Multi-language confirmation button texts
-const confirmTexts = [
-    'confirm', 'bevestigen', 'potvrdit', 'confirmer', 'bestätigen',
-    '确认', 'bevestig', 'confirma', 'confirmar', 'onayla', '確認'
-];
+        console.log(`[B-${browserId}] 🎯 Looking for Confirm button...`);
+        const confirmClicked = await clickConfirmButtonWithRetries();
 
-if (confirmTexts.some(confirmText => text === confirmText || text.includes(confirmText))) {
-                            const style = window.getComputedStyle(element);
-                            const rect = element.getBoundingClientRect();
-                            
-                            if (rect.width > 0 && rect.height > 0 && style.display !== 'none') {
-                                try {
-                                    const parentButton = element.closest('button');
-                                    if (parentButton) {
-                                        parentButton.click();
-                                    } else {
-                                        element.click();
-                                    }
-                                    return true;
-                                } catch (e) {
-                                    continue;
-                                }
-                            }
-                        }
-                    }
-                }
-                
-                return false;
-            });
-            
-            if (confirmClicked) {
-                console.log(`[B-${browserId}] ✅ Confirm button clicked!`);
-            } else {
-                console.log(`[B-${browserId}] ❌ Confirm button NOT found`);
-            }
-        } catch (e) {
-            console.log(`[B-${browserId}] ❌ Click failed: ${e.message}`);
-            confirmClicked = false;
-        }
-        
         if (!confirmClicked) {
-            console.log(`[B-${browserId}] ❌ Button click FAILED - verification FAILED`);
-            
-            // Save to unverified file
-            const unverifiedData = `${email}:${password}\n`;
-            await fs.appendFile('unverified.txt', unverifiedData);
-            console.log(`[B-${browserId}] 💾 Account saved to unverified.txt (button not clicked)`);
-            
-            return false; // ❌ FAIL - button not clicked
+            console.log(`[B-${browserId}] ⚠️ Confirm button not found - trying generic button click...`);
+
+            const genericClicked = await clickGenericVisibleButtonWithRetries();
+
+            if (!genericClicked) {
+                console.log(`[B-${browserId}] ❌ No clickable buttons found - verification FAILED`);
+
+                // Save to unverified file
+                const unverifiedData = `${email}:${password}\n`;
+                await fs.appendFile('unverified.txt', unverifiedData);
+                console.log(`[B-${browserId}] 💾 Account saved to unverified.txt (button not clicked)`);
+
+                return false; // ❌ FAIL - button not clicked
+            }
         }
         
         // Wait for verification to complete
@@ -817,11 +947,12 @@ async function signupOnly() {
         const firstName = faker.person.firstName();
         const lastName = faker.person.lastName();
         const displayName = `${firstName} ${lastName}`;
-        
+
         console.log(`[B-${browserId}] 🚀 SIGNUP ONLY: ${email}`);
-        
+
         const page = await browser.newPage();
-        
+        attachPopupBlocker(page, browserId);
+
         const userAgent = getRandomUserAgent();
         await page.setUserAgent(userAgent);
         
@@ -1040,11 +1171,12 @@ async function signupOnly() {
 
             if (captchaPresent) {
                 console.log(`[B-${browserId}] 🎯 Captcha detected (${captchaAttempts + 1}/${maxCaptchaAttempts})`);
-                
+
                 const captchaHandled = await handleCaptchaWithBuster(page, browserId, 3);
-                
+
                 if (captchaHandled) {
                     console.log(`[B-${browserId}] ✅ Captcha processed!`);
+                    await smartClickContinue(page, browserId);
                     break;
                 }
             } else {
@@ -1146,12 +1278,13 @@ async function signupAndVerify() {
         const firstName = faker.person.firstName();
         const lastName = faker.person.lastName();
         const displayName = `${firstName} ${lastName}`;
-        
+
         console.log(`[B-${browserId}] 🚀 SIGNUP + VERIFY: ${email}`);
         console.log(`[B-${browserId}] 🔗 Unique link assigned`);
-        
+
         const page = await browser.newPage();
-        
+        attachPopupBlocker(page, browserId);
+
         const userAgent = getRandomUserAgent();
         await page.setUserAgent(userAgent);
         
@@ -1370,11 +1503,12 @@ async function signupAndVerify() {
 
             if (captchaPresent) {
                 console.log(`[B-${browserId}] 🎯 Captcha detected (${captchaAttempts + 1}/${maxCaptchaAttempts})`);
-                
+
                 const captchaHandled = await handleCaptchaWithBuster(page, browserId, 3);
-                
+
                 if (captchaHandled) {
                     console.log(`[B-${browserId}] ✅ Captcha processed!`);
+                    await smartClickContinue(page, browserId);
                     break;
                 }
             } else {
