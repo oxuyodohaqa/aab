@@ -171,17 +171,18 @@ async function saveUnverifiedAccount(browserId, email, password, page, reason) {
 
 // Calculate window position
 function getWindowPosition(browserId) {
-    const windowWidth = 370;
-    const windowHeight = 950;
-    const margin = 5;
+    const windowWidth = 320;
+    const windowHeight = 520;
+    const margin = 10;
+    const rowSpacing = windowHeight + 40;
     const browsersPerRow = Math.floor(1920 / (windowWidth + margin));
-    
+
     const row = Math.floor((browserId - 1) / browsersPerRow);
     const col = (browserId - 1) % browsersPerRow;
-    
+
     return {
         x: col * (windowWidth + margin),
-        y: row * (windowHeight + 50)
+        y: row * rowSpacing
     };
 }
 
@@ -682,10 +683,10 @@ async function launchBrowser(browserId) {
             "--disable-popup-blocking",
             `--disable-extensions-except=${extensionPath}`,
             `--load-extension=${extensionPath}`,
-            `--window-size=370,950`,
+            `--window-size=320,520`,
             `--window-position=${windowPos.x},${windowPos.y}`
         ],
-        defaultViewport: { width: 370, height: 950 }
+        defaultViewport: { width: 320, height: 520 }
     });
 }
 
@@ -1422,49 +1423,37 @@ async function main() {
     }
 
     const worker = async (workerId) => {
-        let browser = await launchBrowser(workerId);
+        while (totalSuccessful < userAccountTarget && (userMode === 1 || availableLinks.length > 0)) {
+            let browser;
 
-        try {
-            while (totalSuccessful < userAccountTarget && (userMode === 1 || availableLinks.length > 0)) {
-                try {
-                    if (!browser.isConnected()) {
-                        console.log(`[B-${workerId}] 🔁 Browser disconnected, relaunching...`);
-                        try { await browser.close(); } catch (e) {}
-                        browser = await launchBrowser(workerId);
-                    }
+            try {
+                browser = await launchBrowser(workerId);
 
-                    const result = userMode === 1
-                        ? await signupOnly(browser, workerId)
-                        : await signupAndVerify(browser, workerId);
+                const result = userMode === 1
+                    ? await signupOnly(browser, workerId)
+                    : await signupAndVerify(browser, workerId);
 
-                    totalAttempts++;
+                totalAttempts++;
 
-                    if (result) {
-                        totalSuccessful++;
-                        console.log(`🎯 Progress: ${totalSuccessful}/${userAccountTarget} verified accounts`);
-                    }
+                if (result) {
+                    totalSuccessful++;
+                    console.log(`🎯 Progress: ${totalSuccessful}/${userAccountTarget} verified accounts`);
+                }
 
-                    if (userMode === 2 && availableLinks.length === 0) {
-                        console.log(`📝 Worker #${workerId} stopping - no more links.`);
-                        break;
-                    }
-                } catch (iterationError) {
-                    console.log(`[B-${workerId}] ⚠️ Worker iteration error: ${iterationError.message}`);
-
-                    const browserClosed = !browser.isConnected() || /Target closed/i.test(iterationError.message);
-                    if (browserClosed) {
-                        try { await browser.close(); } catch (e) {}
-                        browser = await launchBrowser(workerId);
-                        console.log(`[B-${workerId}] 🔁 Relaunched browser after termination.`);
-                    }
-
-                    await fastDelay(500);
+                if (userMode === 2 && availableLinks.length === 0) {
+                    console.log(`📝 Worker #${workerId} stopping - no more links.`);
+                    break;
+                }
+            } catch (iterationError) {
+                console.log(`[B-${workerId}] ⚠️ Worker iteration error: ${iterationError.message}`);
+                await fastDelay(500);
+            } finally {
+                if (browser) {
+                    try {
+                        await browser.close();
+                    } catch (e) {}
                 }
             }
-        } finally {
-            try {
-                await browser.close();
-            } catch (e) {}
         }
     };
 
