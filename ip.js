@@ -7,11 +7,15 @@ const readline = require('readline');
 
 // CONFIG
 const CONFIG = {
-    studentsFile: 'students.txt',
-    receiptsDir: 'receipts',
-    collegesFile: 'sheerid_ph.json',
-    outputFile: 'sukses.txt'
+    studentsFile: process.env.STUDENTS_FILE || 'students.txt',
+    receiptsDir: process.env.RECEIPTS_DIR || 'receipts',
+    collegesFile: process.env.COLLEGES_FILE,
+    outputFile: process.env.OUTPUT_FILE || 'sukses.txt'
 };
+
+if (!CONFIG.collegesFile) {
+    CONFIG.collegesFile = 'sheerid_ph.json';
+}
 
 // Create readline interface
 const rl = readline.createInterface({
@@ -62,7 +66,7 @@ function loadColleges() {
         data.forEach(c => map.set(c.id, c));
         return map;
     } catch (e) {
-        console.log(chalk.red('❌ Error loading colleges'));
+        console.log(chalk.red(`❌ Error loading colleges from ${CONFIG.collegesFile}`));
         return new Map();
     }
 }
@@ -122,9 +126,7 @@ async function submitPersonalInfo(verificationId, student, college) {
             organization: {
                 id: college.id,
                 name: college.name
-            },
-            country: 'PH',
-            locale: 'en-PH'
+            }
         };
         
         console.log(chalk.yellow('📝 Actually submitting personal info to SheerID...'));
@@ -404,6 +406,7 @@ async function main() {
     }
     
     console.log(chalk.green(`🔑 Using Verification ID: ${verificationId}`));
+    console.log(chalk.green(`📚 Colleges file: ${CONFIG.collegesFile}`));
     
     // Load colleges
     const collegesMap = loadColleges();
