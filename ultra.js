@@ -291,16 +291,31 @@ async function smartClickContinue(page, browserId, attempts = 6) {
 
 // Detect Google throttling/blocking message during captcha solving
 async function checkCaptchaThrottling(page, browserId) {
-    const throttled = await page.evaluate(() => {
-        const text = (document.body.innerText || '').toLowerCase();
-        return text.includes('try again later') && text.includes('automated queries');
-    });
+    const frames = page.frames();
+    const throttlingIndicators = [
+        'try again later',
+        'automated queries'
+    ];
 
-    if (throttled) {
-        console.log(`[B-${browserId}] 🛑 Captcha blocked with 'Try again later' message`);
+    for (const frame of frames) {
+        try {
+            const text = await frame.evaluate(() => {
+                const body = document.body;
+                return body ? body.innerText.toLowerCase() : '';
+            });
+
+            const throttled = throttlingIndicators.every(indicator => text.includes(indicator));
+            if (throttled) {
+                console.log(`[B-${browserId}] 🛑 Captcha blocked with 'Try again later' message (frame ${frame.name() || 'recaptcha'})`);
+                return true;
+            }
+        } catch (e) {
+            // Ignore cross-origin frames that cannot be read
+            continue;
+        }
     }
 
-    return throttled;
+    return false;
 }
 
 // ENHANCED BUSTER CAPTCHA SOLVER
@@ -442,13 +457,13 @@ async function handleCaptchaWithBuster(page, browserId, maxRetries = 5) {
             
             if (!captchaPresent) {
                 console.log(`[B-${browserId}] ✅ No captcha detected`);
-                
+
                 // Try to click continue anyway
                 await smartClickContinue(page, browserId);
-                
+
                 return true;
             }
-            
+
             const captchaSolved = await solveCaptchaWithBuster(page, browserId, retryCount);
 
             if (captchaSolved) {
@@ -469,6 +484,8 @@ async function handleCaptchaWithBuster(page, browserId, maxRetries = 5) {
                     await smartClickContinue(page, browserId);
                     await fastDelay(800);
                 }
+            } else if (await checkCaptchaThrottling(page, browserId)) {
+                throw new Error('CAPTCHA_THROTTLED');
             }
 
             retryCount++;
