@@ -30,6 +30,36 @@ const captchaDelay = (ms) => new Promise(resolve => setTimeout(resolve, ms));
 let browserCounter = 0;
 let totalSuccessful = 0;
 let totalAttempts = 0;
+const activeBrowsers = new Map();
+
+const baseViewport = { width: 370, height: 950 };
+
+function buildViewport(browserId) {
+    const widthJitter = Math.floor(Math.random() * 20); // 0-19
+    const heightJitter = Math.floor(Math.random() * 40); // 0-39
+
+    return {
+        width: baseViewport.width + widthJitter,
+        height: baseViewport.height + heightJitter,
+    };
+}
+
+function registerBrowser(browserId, browser) {
+    activeBrowsers.set(browserId, browser);
+}
+
+async function closeTrackedBrowser(browserId) {
+    const browser = activeBrowsers.get(browserId);
+    if (!browser) return;
+
+    activeBrowsers.delete(browserId);
+
+    try {
+        await browser.close();
+    } catch (e) {
+        // Ignore close errors
+    }
+}
 
 // Links management
 let availableLinks = [];
@@ -149,8 +179,8 @@ async function updateLinksFile() {
 
 // Calculate window position
 function getWindowPosition(browserId) {
-    const windowWidth = 370;
-    const windowHeight = 950;
+    const windowWidth = baseViewport.width;
+    const windowHeight = baseViewport.height;
     const margin = 5;
     const browsersPerRow = Math.floor(1920 / (windowWidth + margin));
     
@@ -161,6 +191,38 @@ function getWindowPosition(browserId) {
         x: col * (windowWidth + margin),
         y: row * (windowHeight + 50)
     };
+}
+
+async function launchTrackedBrowser(browserId, extensionPath, windowPos) {
+    const viewport = buildViewport(browserId);
+
+    const browser = await puppeteer.launch({
+        headless: false,
+        ignoreDefaultArgs: ["--enable-automation"],
+        args: [
+            "--no-sandbox",
+            "--disable-setuid-sandbox",
+            "--disable-web-security",
+            "--disable-features=VizDisplayCompositor",
+            "--disable-blink-features=AutomationControlled",
+            "--disable-dev-shm-usage",
+            "--no-first-run",
+            "--disable-default-apps",
+            "--disable-popup-blocking",
+            "--disable-infobars",
+            "--lang=en-US,en",
+            ...(extensionPath ? [
+                `--disable-extensions-except=${extensionPath}`,
+                `--load-extension=${extensionPath}`
+            ] : []),
+            `--window-size=${viewport.width},${viewport.height}`,
+            `--window-position=${windowPos.x},${windowPos.y}`
+        ],
+        defaultViewport: viewport
+    });
+
+    registerBrowser(browserId, browser);
+    return browser;
 }
 
 // COMPLETE COOKIE BLOCKER
@@ -210,6 +272,61 @@ async function blockAllCookies(page, browserId) {
         console.log(`[B-${browserId}] ⚠️ Cookie blocking error: ${error.message}`);
         return false;
     }
+}
+
+// Block popups, dialogs, and extra tabs opened from the active page
+function attachPopupBlocker(page, browserId) {
+    const browser = page.browser();
+    const parentTarget = page.target();
+
+    const dialogHandler = async (dialog) => {
+        try {
+            console.log(`[B-${browserId}] 🚫 Dismissing dialog: ${dialog.message()}`);
+            await dialog.dismiss();
+        } catch (error) {
+            console.log(`[B-${browserId}] ⚠️ Dialog dismiss error: ${error.message}`);
+        }
+    };
+
+    const popupHandler = async (popupPage) => {
+        try {
+            console.log(`[B-${browserId}] 🚫 Closing popup page: ${popupPage.url()}`);
+            await popupPage.close();
+        } catch (error) {
+            console.log(`[B-${browserId}] ⚠️ Popup close error: ${error.message}`);
+        }
+    };
+
+    const targetHandler = async (target) => {
+        try {
+            if (target.type() !== 'page') return;
+
+            const opener = target.opener();
+            if (!opener || opener._targetId !== parentTarget._targetId) return;
+
+            const popupPage = await target.page();
+            if (!popupPage) return;
+
+            console.log(`[B-${browserId}] 🚫 Closing new tab: ${target.url() || 'about:blank'}`);
+            await popupPage.close();
+        } catch (error) {
+            console.log(`[B-${browserId}] ⚠️ Target close error: ${error.message}`);
+        }
+    };
+
+    page.on('dialog', dialogHandler);
+    page.on('popup', popupHandler);
+    browser.on('targetcreated', targetHandler);
+
+    const cleanup = () => {
+        page.removeListener('dialog', dialogHandler);
+        page.removeListener('popup', popupHandler);
+        browser.removeListener('targetcreated', targetHandler);
+    };
+
+    page.once('close', cleanup);
+
+    return cleanup;
 }
 
 // Smart Continue button clicker - works even with captcha present
@@ -287,6 +404,73 @@ async function smartClickContinue(page, browserId, attempts = 6) {
         console.log(`[B-${browserId}] ⚠️ Continue error: ${error.message}`);
         return false;
     }
+}
+
+async function waitForVisibleSelector(page, selectors, browserId, contextLabel, timeout = 15000) {
+    const start = Date.now();
+    let retriedContinue = false;
+
+    while (Date.now() - start < timeout) {
+        for (const frame of page.frames()) {
+            for (const selector of selectors) {
+                const handle = await frame.$(selector);
+                if (!handle) continue;
+
+                const isVisible = await frame.evaluate((el) => {
+                    const rect = el.getBoundingClientRect();
+                    const style = window.getComputedStyle(el);
+                    return rect.width > 0 &&
+                        rect.height > 0 &&
+                        style.visibility !== 'hidden' &&
+                        style.display !== 'none';
+                }, handle);
+
+                if (isVisible) {
+                    await frame.evaluate((el) => el.scrollIntoView({ behavior: 'instant', block: 'center' }), handle);
+                    return { frame, handle };
+                }
+            }
+        }
+
+        if (!retriedContinue && Date.now() - start > 4000) {
+            console.log(`[B-${browserId}] 🔄 Retrying continue to reach ${contextLabel} field...`);
+            await smartClickContinue(page, browserId, 2);
+            retriedContinue = true;
+        }
+
+        await fastDelay(300);
+    }
+
+    throw new Error(`${contextLabel} input not found after ${timeout}ms`);
+}
+
+// Detect Google throttling/blocking message during captcha solving
+async function checkCaptchaThrottling(page, browserId) {
+    const frames = page.frames();
+    const throttlingIndicators = [
+        'try again later',
+        'automated queries'
+    ];
+
+    for (const frame of frames) {
+        try {
+            const text = await frame.evaluate(() => {
+                const body = document.body;
+                return body ? body.innerText.toLowerCase() : '';
+            });
+
+            const throttled = throttlingIndicators.every(indicator => text.includes(indicator));
+            if (throttled) {
+                console.log(`[B-${browserId}] 🛑 Captcha blocked with 'Try again later' message (frame ${frame.name() || 'recaptcha'})`);
+                return true;
+            }
+        } catch (e) {
+            // Ignore cross-origin frames that cannot be read
+            continue;
+        }
+    }
+
+    return false;
 }
 
 // ENHANCED BUSTER CAPTCHA SOLVER
@@ -412,11 +596,15 @@ async function solveCaptchaWithBuster(page, browserId, attempt) {
 // ENHANCED CAPTCHA HANDLER WITH MULTIPLE CONTINUE ATTEMPTS
 async function handleCaptchaWithBuster(page, browserId, maxRetries = 5) {
     let retryCount = 0;
-    
+
     while (retryCount < maxRetries) {
         try {
+            if (await checkCaptchaThrottling(page, browserId)) {
+                throw new Error('CAPTCHA_THROTTLED');
+            }
+
             console.log(`[B-${browserId}] 🤖 Captcha attempt ${retryCount + 1}/${maxRetries}`);
-            
+
             // Check if captcha is still present
             const captchaPresent = await page.evaluate(() => {
                 return document.querySelector('iframe[src*="recaptcha"]') !== null;
@@ -424,13 +612,13 @@ async function handleCaptchaWithBuster(page, browserId, maxRetries = 5) {
             
             if (!captchaPresent) {
                 console.log(`[B-${browserId}] ✅ No captcha detected`);
-                
+
                 // Try to click continue anyway
                 await smartClickContinue(page, browserId);
-                
+
                 return true;
             }
-            
+
             const captchaSolved = await solveCaptchaWithBuster(page, browserId, retryCount);
 
             if (captchaSolved) {
@@ -451,6 +639,8 @@ async function handleCaptchaWithBuster(page, browserId, maxRetries = 5) {
                     await smartClickContinue(page, browserId);
                     await fastDelay(800);
                 }
+            } else if (await checkCaptchaThrottling(page, browserId)) {
+                throw new Error('CAPTCHA_THROTTLED');
             }
 
             retryCount++;
@@ -461,6 +651,11 @@ async function handleCaptchaWithBuster(page, browserId, maxRetries = 5) {
             
         } catch (error) {
             console.log(`[B-${browserId}] ⚠️ Attempt ${retryCount + 1} error: ${error.message}`);
+
+            if (error.message === 'CAPTCHA_THROTTLED') {
+                throw error;
+            }
+
             retryCount++;
             await fastDelay(2000);
         }
@@ -475,31 +670,154 @@ async function handleCaptchaWithBuster(page, browserId, maxRetries = 5) {
 
 // ✅ STRICT STUDENT VERIFICATION - ONLY RETURNS TRUE ON ACTUAL SUCCESS
 async function verifyStudentAccount(page, browserId, verificationUrl, email, password) {
+    async function clickFirstVisibleButton() {
+        try {
+            return await page.evaluate(() => {
+                const candidates = [
+                    'button',
+                    'a[role="button"]',
+                    'div[role="button"]'
+                ];
+
+                for (const selector of candidates) {
+                    const elements = Array.from(document.querySelectorAll(selector));
+
+                    for (const element of elements) {
+                        const rect = element.getBoundingClientRect();
+                        const style = window.getComputedStyle(element);
+                        const visible = rect.width > 0 && rect.height > 0 && style.display !== 'none' && style.visibility !== 'hidden';
+
+                        if (!visible) continue;
+
+                        try {
+                            element.click();
+                            return true;
+                        } catch (err) {
+                            continue;
+                        }
+                    }
+                }
+
+                return false;
+            });
+        } catch (error) {
+            console.log(`[B-${browserId}] ❌ Fallback button click failed: ${error.message}`);
+            return false;
+        }
+    }
+
+    async function clickConfirmButtonOnce() {
+        try {
+            return await page.evaluate(() => {
+                const spotifySelectors = [
+                    '.ButtonInner-sc-14ud5tc-0',
+                    '.encore-bright-accent-set',
+                    'span[class*="ButtonInner"]',
+                    'button',
+                    'a[role="button"]'
+                ];
+
+                const confirmTexts = [
+                    'confirm', 'bevestigen', 'potvrdit', 'confirmer', 'bestätigen',
+                    '确认', 'bevestig', 'confirma', 'confirmar', 'onayla', '確認',
+                    'continue', 'accept', 'activate'
+                ];
+
+                for (const selector of spotifySelectors) {
+                    const elements = document.querySelectorAll(selector);
+                    for (const element of elements) {
+                        const text = (element.textContent || element.innerText || '').trim().toLowerCase();
+
+                        if (!confirmTexts.some(confirmText => text === confirmText || text.includes(confirmText))) continue;
+
+                        const style = window.getComputedStyle(element);
+                        const rect = element.getBoundingClientRect();
+
+                        if (rect.width > 0 && rect.height > 0 && style.display !== 'none' && style.visibility !== 'hidden') {
+                            try {
+                                const parentButton = element.closest('button');
+                                if (parentButton) {
+                                    parentButton.click();
+                                } else {
+                                    element.click();
+                                }
+                                return true;
+                            } catch (e) {
+                                continue;
+                            }
+                        }
+                    }
+                }
+
+                return false;
+            });
+        } catch (error) {
+            console.log(`[B-${browserId}] ❌ Confirm click attempt failed: ${error.message}`);
+            return false;
+        }
+    }
+
+    async function clickConfirmButtonWithRetries() {
+        const maxAttempts = 6;
+
+        for (let attempt = 1; attempt <= maxAttempts; attempt++) {
+            const clicked = await clickConfirmButtonOnce();
+
+            if (clicked) {
+                console.log(`[B-${browserId}] ✅ Confirm button clicked on attempt ${attempt}`);
+                return true;
+            }
+
+            console.log(`[B-${browserId}] ⏳ Confirm button not ready (attempt ${attempt}/${maxAttempts}) - waiting...`);
+            await fastDelay(1200);
+        }
+
+        return false;
+    }
+
+    async function clickGenericVisibleButtonWithRetries() {
+        const maxAttempts = 3;
+
+        for (let attempt = 1; attempt <= maxAttempts; attempt++) {
+            const clicked = await clickFirstVisibleButton();
+
+            if (clicked) {
+                console.log(`[B-${browserId}] ✅ Generic button clicked on attempt ${attempt}`);
+                return true;
+            }
+
+            console.log(`[B-${browserId}] ⏳ No generic button found (attempt ${attempt}/${maxAttempts}) - retrying...`);
+            await fastDelay(800);
+        }
+
+        return false;
+    }
+
     try {
         console.log(`[B-${browserId}] 🎓 Starting student verification process...`);
         console.log(`[B-${browserId}] 🔗 Verification URL: ${verificationUrl.substring(0, 60)}...`);
         
-        await page.goto(verificationUrl, { 
+        await page.goto(verificationUrl, {
             waitUntil: "domcontentloaded",
-            timeout: 30000 
+            timeout: 30000
         });
+
+        await fastDelay(1000);
         
-        await fastDelay(5000);
-        
-const isConfirmationPage = await page.evaluate(() => {
-    const url = window.location.href;
-    const pageText = document.body.textContent.toLowerCase();
-    
-    // Multi-language confirmation page detection
-    const confirmationIndicators = [
-        'confirm your account', 'confirm', 'verification', 'bevestigen',
-        'student discount', 'verify', 'potvrdit', 'confirmer', 'bestätigen',
-        '确认', 'bevestig', 'confirma', 'confirmar', 'onayla', '確認'
-    ];
-    
-    return (url.includes('student') && url.includes('apply')) ||
-           confirmationIndicators.some(indicator => pageText.includes(indicator));
-});
+        const isConfirmationPage = await page.evaluate(() => {
+            const url = window.location.href;
+            const pageText = document.body.textContent.toLowerCase();
+
+            // Multi-language confirmation page detection
+            const confirmationIndicators = [
+                'confirm your account', 'confirm', 'verification', 'bevestigen',
+                'student discount', 'verify', 'potvrdit', 'confirmer', 'bestätigen',
+                '确认', 'bevestig', 'confirma', 'confirmar', 'onayla', '確認', '확인'
+            ];
+
+            return (url.includes('student') && url.includes('apply')) ||
+                   confirmationIndicators.some(indicator => pageText.includes(indicator));
+        });
         
         if (!isConfirmationPage) {
             console.log(`[B-${browserId}] ❌ NOT a confirmation page - verification FAILED`);
@@ -514,95 +832,75 @@ const isConfirmationPage = await page.evaluate(() => {
         
         console.log(`[B-${browserId}] ✅ Student confirmation page detected!`);
         
-        let confirmClicked = false;
-        
-        try {
-            console.log(`[B-${browserId}] 🎯 Looking for Confirm button...`);
-            
-            confirmClicked = await page.evaluate(() => {
-                const spotifySelectors = [
-                    '.ButtonInner-sc-14ud5tc-0',
-                    '.encore-bright-accent-set',
-                    'span[class*="ButtonInner"]',
-                    'button'
-                ];
-                
-                for (const selector of spotifySelectors) {
-                    const elements = document.querySelectorAll(selector);
-                    for (const element of elements) {
-                        const text = (element.textContent || element.innerText || '').trim().toLowerCase();
-                        // Multi-language confirmation button texts
-const confirmTexts = [
-    'confirm', 'bevestigen', 'potvrdit', 'confirmer', 'bestätigen',
-    '确认', 'bevestig', 'confirma', 'confirmar', 'onayla', '確認'
-];
+        // Quick pass: some links immediately show a "you're verified" page without a confirm button
+        const immediateSuccess = await page.evaluate(() => {
+            const pageText = document.body.textContent.toLowerCase();
+            const url = window.location.href;
 
-if (confirmTexts.some(confirmText => text === confirmText || text.includes(confirmText))) {
-                            const style = window.getComputedStyle(element);
-                            const rect = element.getBoundingClientRect();
-                            
-                            if (rect.width > 0 && rect.height > 0 && style.display !== 'none') {
-                                try {
-                                    const parentButton = element.closest('button');
-                                    if (parentButton) {
-                                        parentButton.click();
-                                    } else {
-                                        element.click();
-                                    }
-                                    return true;
-                                } catch (e) {
-                                    continue;
-                                }
-                            }
-                        }
-                    }
-                }
-                
-                return false;
-            });
-            
-            if (confirmClicked) {
-                console.log(`[B-${browserId}] ✅ Confirm button clicked!`);
-            } else {
-                console.log(`[B-${browserId}] ❌ Confirm button NOT found`);
-            }
-        } catch (e) {
-            console.log(`[B-${browserId}] ❌ Click failed: ${e.message}`);
-            confirmClicked = false;
+            const successIndicators = [
+                "you're verified as a student", "student status is verified",
+                "you are verified", "verified as a student", "you're verified",
+                "verification complete", "discount activated", "student discount confirmed"
+            ];
+
+            return successIndicators.some(indicator => pageText.includes(indicator)) ||
+                   url.includes('success') || url.includes('verified') || url.includes('complete');
+        });
+
+        if (immediateSuccess) {
+            console.log(`[B-${browserId}] ✅ Already verified message detected - skipping confirm click`);
+
+            const accountData = `${email}:${password}\n`;
+            await fs.appendFile('verifiedstudent.txt', accountData);
+            console.log(`[B-${browserId}] 💾 Account saved to verifiedstudent.txt!`);
+
+            await fastDelay(2000);
+            return true;
         }
-        
+
+        console.log(`[B-${browserId}] 🎯 Looking for Confirm button...`);
+        const confirmClicked = await clickConfirmButtonWithRetries();
+
         if (!confirmClicked) {
-            console.log(`[B-${browserId}] ❌ Button click FAILED - verification FAILED`);
-            
-            // Save to unverified file
-            const unverifiedData = `${email}:${password}\n`;
-            await fs.appendFile('unverified.txt', unverifiedData);
-            console.log(`[B-${browserId}] 💾 Account saved to unverified.txt (button not clicked)`);
-            
-            return false; // ❌ FAIL - button not clicked
+            console.log(`[B-${browserId}] ⚠️ Confirm button not found - trying generic button click...`);
+
+            const genericClicked = await clickGenericVisibleButtonWithRetries();
+
+            if (!genericClicked) {
+                console.log(`[B-${browserId}] ❌ No clickable buttons found - verification FAILED`);
+
+                // Save to unverified file
+                const unverifiedData = `${email}:${password}\n`;
+                await fs.appendFile('unverified.txt', unverifiedData);
+                console.log(`[B-${browserId}] 💾 Account saved to unverified.txt (button not clicked)`);
+
+                return false; // ❌ FAIL - button not clicked
+            }
         }
         
         // Wait for verification to complete
         console.log(`[B-${browserId}] ⏳ Waiting for verification message...`);
         
         try {
-await page.waitForFunction(() => {
-    const pageText = document.body.textContent.toLowerCase();
-    const url = window.location.href;
-    
-    // Multi-language success indicators
-    const successIndicators = [
-        'verified', 'you\'re verified', 'student status is verified',
-        'verification successful', 'verification complete', 'confirmed',
-        'success', 'complete', 'discount activated', 'student discount confirmed',
-        'congratulations', 'úspěch', 'successo', 'éxito', 'erfolg', '成功'
-    ];
-    
-    return successIndicators.some(indicator => pageText.includes(indicator)) ||
-           url.includes('success') || url.includes('complete') || 
-           url.includes('verified') || url.includes('successo') ||
-           url.includes('úspěch') || url.includes('éxito');
-}, { timeout: 45000 });
+            await page.waitForFunction(() => {
+                const pageText = document.body.textContent.toLowerCase();
+                const url = window.location.href;
+
+                // Multi-language success indicators (expanded for post-verify landing)
+                const successIndicators = [
+                    'verified', "you're verified", "you're verified as a student",
+                    'verified as a student', 'student status is verified',
+                    'verification successful', 'verification complete', 'confirmed',
+                    'success', 'complete', 'discount activated', 'student discount confirmed',
+                    'congratulations', 'úspěch', 'successo', 'éxito', 'erfolg', '成功',
+                    'choose your plan'
+                ];
+
+                return successIndicators.some(indicator => pageText.includes(indicator)) ||
+                       url.includes('success') || url.includes('complete') ||
+                       url.includes('verified') || url.includes('successo') ||
+                       url.includes('úspěch') || url.includes('éxito');
+            }, { timeout: 45000 });
             
             console.log(`[B-${browserId}] ✅ VERIFICATION MESSAGE DETECTED!`);
             console.log(`[B-${browserId}] 🎉 STUDENT VERIFICATION COMPLETED!`);
@@ -652,6 +950,19 @@ async function clearAndType(page, element, text) {
     await element.type(text, { delay: 30 });
 }
 
+async function saveAccountToFile(fileName, email, password, reason, browserId) {
+    if (!email || !password) return;
+
+    const accountData = `${email}:${password}\n`;
+
+    try {
+        await fs.appendFile(fileName, accountData);
+        console.log(`[B-${browserId}] 💾 Account saved to ${fileName}${reason ? ` (${reason})` : ''}`);
+    } catch (saveError) {
+        console.log(`[B-${browserId}] ❌ Save failed: ${saveError.message}`);
+    }
+}
+
 // SIGNUP ONLY FUNCTION - Saves to spotify.txt
 async function signupOnly() {
     const extensionPath = path.join(__dirname, 'buster');
@@ -665,36 +976,21 @@ async function signupOnly() {
     const browserId = browserCounter;
     const windowPos = getWindowPosition(browserId);
     
-    const browser = await puppeteer.launch({
-        headless: false,
-        args: [
-            "--no-sandbox",
-            "--disable-setuid-sandbox",
-            "--disable-web-security",
-            "--disable-features=VizDisplayCompositor",
-            "--disable-blink-features=AutomationControlled",
-            "--disable-dev-shm-usage",
-            "--no-first-run",
-            "--disable-default-apps",
-            "--disable-popup-blocking",
-            `--disable-extensions-except=${extensionPath}`,
-            `--load-extension=${extensionPath}`,
-            `--window-size=370,950`,
-            `--window-position=${windowPos.x},${windowPos.y}`
-        ],
-        defaultViewport: { width: 370, height: 950 }
-    });
+    const browser = await launchTrackedBrowser(browserId, extensionPath, windowPos);
     
+    let email;
+
     try {
-        const email = generateEmail();
+        email = generateEmail();
         const firstName = faker.person.firstName();
         const lastName = faker.person.lastName();
         const displayName = `${firstName} ${lastName}`;
-        
+
         console.log(`[B-${browserId}] 🚀 SIGNUP ONLY: ${email}`);
-        
+
         const page = await browser.newPage();
-        
+        attachPopupBlocker(page, browserId);
+
         const userAgent = getRandomUserAgent();
         await page.setUserAgent(userAgent);
         
@@ -746,31 +1042,21 @@ async function signupOnly() {
 
         // Password step
         console.log(`[B-${browserId}] 🔐 Step 2: Password`);
-        await page.waitForSelector("input[data-testid='password'], #new-password, input[name='password'], input[type='password']", { timeout: 10000 });
-        
         const passwordSelectors = [
             "input[data-testid='password']",
+            "input[data-testid='new-password']",
             "#new-password",
-            "input[name='password']", 
-            "input[type='password']"
+            "#password",
+            "input[name='password']",
+            "input[type='password']",
+            "input[autocomplete='new-password']"
         ];
-        
-        let passwordFilled = false;
-        for (const selector of passwordSelectors) {
-            const passwordInput = await page.$(selector);
-            if (passwordInput) {
-                await passwordInput.click();
-                await fastDelay(200);
-                await passwordInput.type(config.password, { delay: 30 });
-                console.log(`[B-${browserId}] ✅ Password entered`);
-                passwordFilled = true;
-                break;
-            }
-        }
-        
-        if (!passwordFilled) {
-            throw new Error("Password input not found");
-        }
+
+        const passwordInput = await waitForVisibleSelector(page, passwordSelectors, browserId, 'password', 16000);
+        await passwordInput.handle.click();
+        await fastDelay(200);
+        await passwordInput.handle.type(config.password, { delay: 30 });
+        console.log(`[B-${browserId}] ✅ Password entered`);
 
         await fastDelay(1000);
         await smartClickContinue(page, browserId);
@@ -913,11 +1199,12 @@ async function signupOnly() {
 
             if (captchaPresent) {
                 console.log(`[B-${browserId}] 🎯 Captcha detected (${captchaAttempts + 1}/${maxCaptchaAttempts})`);
-                
+
                 const captchaHandled = await handleCaptchaWithBuster(page, browserId, 3);
-                
+
                 if (captchaHandled) {
                     console.log(`[B-${browserId}] ✅ Captcha processed!`);
+                    await smartClickContinue(page, browserId);
                     break;
                 }
             } else {
@@ -927,7 +1214,7 @@ async function signupOnly() {
             }
             
             captchaAttempts++;
-            await fastDelay(5000);
+            await fastDelay(1000);
         }
 
         // Wait for signup completion
@@ -971,12 +1258,17 @@ async function signupOnly() {
         }
 
     } catch (error) {
-        console.log(`[B-${browserId}] ❌ Error: ${error.message}`);
+        if (error.message === 'CAPTCHA_THROTTLED') {
+            console.log(`[B-${browserId}] 🛑 Captcha throttled - closing browser and moving to next task`);
+            await saveAccountToFile('unverified.txt', email, config.password, 'captcha throttled', browserId);
+        } else {
+            console.log(`[B-${browserId}] ❌ Error: ${error.message}`);
+            await saveAccountToFile('unverified.txt', email, config.password, 'error before completion', browserId);
+        }
+
         return false;
     } finally {
-        try {
-            await browser.close();
-        } catch (e) {}
+        await closeTrackedBrowser(browserId);
     }
 }
 
@@ -1005,37 +1297,22 @@ async function signupAndVerify() {
     
     const windowPos = getWindowPosition(browserId);
     
-    const browser = await puppeteer.launch({
-        headless: false,
-        args: [
-            "--no-sandbox",
-            "--disable-setuid-sandbox",
-            "--disable-web-security",
-            "--disable-features=VizDisplayCompositor",
-            "--disable-blink-features=AutomationControlled",
-            "--disable-dev-shm-usage",
-            "--no-first-run",
-            "--disable-default-apps",
-            "--disable-popup-blocking",
-            `--disable-extensions-except=${extensionPath}`,
-            `--load-extension=${extensionPath}`,
-            `--window-size=370,950`,
-            `--window-position=${windowPos.x},${windowPos.y}`
-        ],
-        defaultViewport: { width: 370, height: 950 }
-    });
+    const browser = await launchTrackedBrowser(browserId, extensionPath, windowPos);
     
+    let email;
+
     try {
-        const email = generateEmail();
+        email = generateEmail();
         const firstName = faker.person.firstName();
         const lastName = faker.person.lastName();
         const displayName = `${firstName} ${lastName}`;
-        
+
         console.log(`[B-${browserId}] 🚀 SIGNUP + VERIFY: ${email}`);
         console.log(`[B-${browserId}] 🔗 Unique link assigned`);
-        
+
         const page = await browser.newPage();
-        
+        attachPopupBlocker(page, browserId);
+
         const userAgent = getRandomUserAgent();
         await page.setUserAgent(userAgent);
         
@@ -1087,31 +1364,21 @@ async function signupAndVerify() {
 
         // Password step
         console.log(`[B-${browserId}] 🔐 Step 2: Password`);
-        await page.waitForSelector("input[data-testid='password'], #new-password, input[name='password'], input[type='password']", { timeout: 10000 });
-        
         const passwordSelectors = [
             "input[data-testid='password']",
+            "input[data-testid='new-password']",
             "#new-password",
-            "input[name='password']", 
-            "input[type='password']"
+            "#password",
+            "input[name='password']",
+            "input[type='password']",
+            "input[autocomplete='new-password']"
         ];
-        
-        let passwordFilled = false;
-        for (const selector of passwordSelectors) {
-            const passwordInput = await page.$(selector);
-            if (passwordInput) {
-                await passwordInput.click();
-                await fastDelay(200);
-                await passwordInput.type(config.password, { delay: 30 });
-                console.log(`[B-${browserId}] ✅ Password entered`);
-                passwordFilled = true;
-                break;
-            }
-        }
-        
-        if (!passwordFilled) {
-            throw new Error("Password input not found");
-        }
+
+        const passwordInput = await waitForVisibleSelector(page, passwordSelectors, browserId, 'password', 16000);
+        await passwordInput.handle.click();
+        await fastDelay(200);
+        await passwordInput.handle.type(config.password, { delay: 30 });
+        console.log(`[B-${browserId}] ✅ Password entered`);
 
         await fastDelay(1000);
         await smartClickContinue(page, browserId);
@@ -1254,11 +1521,12 @@ async function signupAndVerify() {
 
             if (captchaPresent) {
                 console.log(`[B-${browserId}] 🎯 Captcha detected (${captchaAttempts + 1}/${maxCaptchaAttempts})`);
-                
+
                 const captchaHandled = await handleCaptchaWithBuster(page, browserId, 3);
-                
+
                 if (captchaHandled) {
                     console.log(`[B-${browserId}] ✅ Captcha processed!`);
+                    await smartClickContinue(page, browserId);
                     break;
                 }
             } else {
@@ -1268,7 +1536,7 @@ async function signupAndVerify() {
             }
             
             captchaAttempts++;
-            await fastDelay(5000);
+            await fastDelay(1000);
         }
 
         // Wait for signup completion
@@ -1326,16 +1594,20 @@ async function signupAndVerify() {
         }
 
     } catch (error) {
-        console.log(`[B-${browserId}] ❌ Error: ${error.message}`);
-        
+        if (error.message === 'CAPTCHA_THROTTLED') {
+            console.log(`[B-${browserId}] 🛑 Captcha throttled - closing browser and continuing with next account`);
+            await saveAccountToFile('unverified.txt', email, config.password, 'captcha throttled', browserId);
+        } else {
+            console.log(`[B-${browserId}] ❌ Error: ${error.message}`);
+            await saveAccountToFile('unverified.txt', email, config.password, 'error before verification', browserId);
+        }
+
         // ✅ Return link to pool on error
         returnLinkToPool(browserId, spotifyLink);
-        
+
         return false; // ❌ Link returned to pool
     } finally {
-        try {
-            await browser.close();
-        } catch (e) {}
+        await closeTrackedBrowser(browserId);
     }
 }
 
@@ -1501,9 +1773,7 @@ async function main() {
         
         batchCounter++;
         
-        const waitTime = 5000;
-        console.log(`\n⏳ Next batch in ${waitTime/1000}s...`);
-        await delay(waitTime);
+        console.log(`\n⏩ Starting next batch immediately...`);
     }
     
     console.log(`\n🏁 === FINAL RESULTS ===`);
@@ -1523,7 +1793,14 @@ async function main() {
 process.on('SIGINT', async () => {
     console.log('\n🛑 Shutting down...');
     console.log(`✅ Total verified: ${totalSuccessful || 0}`);
-    
+
+    if (activeBrowsers.size > 0) {
+        console.log(`🧹 Closing ${activeBrowsers.size} active browser(s)...`);
+        for (const browserId of Array.from(activeBrowsers.keys())) {
+            await closeTrackedBrowser(browserId);
+        }
+    }
+
     if (userMode === 2) {
         console.log(`📋 Links used: ${usedLinks.length}`);
         console.log(`📋 Links remaining: ${availableLinks.length}`);
