@@ -39,16 +39,18 @@ function loadStudents() {
             .filter(line => line.trim())
             .map(line => {
                 const parts = line.split('|').map(s => s.trim());
-                if (parts.length < 2) return null;
-                const [name, studentId] = parts;
-                const nameParts = name.split(' ');
-                const firstName = nameParts[0] || 'TEST';
-                const lastName = nameParts.slice(1).join(' ') || 'USER';
+                if (parts.length < 4) return null;
+
+                const [school, firstNameRaw, lastNameRaw, emailRaw] = parts;
+                const firstName = firstNameRaw || 'TEST';
+                const lastName = lastNameRaw || 'USER';
+                const email = emailRaw || `${firstName.toLowerCase()}.${lastName.toLowerCase()}@example.com`;
+
                 return {
+                    school,
                     firstName: firstName.toUpperCase(),
                     lastName: lastName.toUpperCase(),
-                    email: `${firstName.toLowerCase()}.${lastName.toLowerCase()}${Math.floor(Math.random() * 9999)}@gmail.com`,
-                    studentId: studentId
+                    email: email.toLowerCase()
                 };
             })
             .filter(s => s);
@@ -71,19 +73,18 @@ function loadColleges() {
     }
 }
 
-// FIND STUDENT FILES
-function findStudentFiles(studentId) {
-    if (!fs.existsSync(CONFIG.receiptsDir)) return [];
-    const files = fs.readdirSync(CONFIG.receiptsDir);
-    return files
-        .filter(file => file.startsWith(studentId + '_') || file.startsWith('SCHEDULE_' + studentId + '_'))
-        .map(file => path.join(CONFIG.receiptsDir, file));
-}
+// MATCH COLLEGE BY NAME
+function findCollegeByName(collegesMap, schoolName) {
+    const target = schoolName?.trim().toLowerCase();
+    if (!target) return null;
 
-// GET COLLEGE ID FROM FILE
-function getCollegeIdFromFile(studentId, filename) {
-    const match = filename.match(new RegExp(`${studentId}_(\\d+)\\.`));
-    return match ? parseInt(match[1]) : null;
+    for (const college of collegesMap.values()) {
+        if (college.name?.toLowerCase() === target) {
+            return college;
+        }
+    }
+
+    return null;
 }
 
 // DEBUG: Get full verification details
@@ -275,36 +276,18 @@ function saveResult(url) {
 
 // PROCESS STUDENT WITH PROVIDED VERIFICATION ID
 async function processStudent(student, collegesMap, verificationId) {
-    console.log(chalk.cyan(`\n🎯 Processing: ${student.firstName} ${student.lastName} (${student.studentId})`));
-    
+    console.log(chalk.cyan(`\n🎯 Processing: ${student.firstName} ${student.lastName}`));
+
     // Debug: Show verification details
     await getVerificationDetails(verificationId);
-    
-    // Find files
-    const files = findStudentFiles(student.studentId);
-    if (files.length === 0) {
-        console.log(chalk.red('❌ No files found'));
-        return null;
-    }
-    
-    console.log(chalk.blue(`📁 Found ${files.length} file(s)`));
-    
-    // Get college ID from first file
-    const firstFile = files[0];
-    const collegeId = getCollegeIdFromFile(student.studentId, path.basename(firstFile));
-    
-    if (!collegeId) {
-        console.log(chalk.red('❌ Could not extract college ID from filename'));
-        return null;
-    }
-    
-    // Get college info
-    const college = collegesMap.get(collegeId);
+
+    // Get college info by name
+    const college = findCollegeByName(collegesMap, student.school);
     if (!college) {
-        console.log(chalk.red(`❌ College ${collegeId} not found in database`));
+        console.log(chalk.red(`❌ School not found in database: ${student.school || 'Unknown'}`));
         return null;
     }
-    
+
     console.log(chalk.blue(`🏫 College: ${college.name}`));
     
     // STEP 1: Submit personal info (if needed)
@@ -350,33 +333,8 @@ async function processStudent(student, collegesMap, verificationId) {
     
     // STEP 3: Upload document if at docUpload step
     if (currentStep === 'docUpload') {
-        console.log(chalk.yellow('📤 Ready for document upload...'));
-        
-        for (const file of files) {
-            console.log(chalk.blue(`📄 Processing file: ${path.basename(file)}`));
-            
-            const uploadResult = await uploadDocument(verificationId, file);
-            if (uploadResult.success) {
-                console.log(chalk.yellow('⏳ Waiting for verification processing...'));
-                await new Promise(r => setTimeout(r, 10000));
-                
-                // Check if verification succeeded
-                const finalCheck = await checkStatus(verificationId);
-                if (finalCheck.success && finalCheck.currentStep === 'success') {
-                    console.log(chalk.green('✅ Verification successful!'));
-                    
-                    // Try to get google URL
-                    console.log(chalk.yellow('🎉 Attempting to get google URL...'));
-                    const googleResult = await getgoogleUrl(verificationId);
-                    if (googleResult.success) {
-                        saveResult(googleResult.url);
-                        return googleResult.url;
-                    }
-                } else {
-                    console.log(chalk.yellow(`Current step: ${finalCheck.currentStep}`));
-                }
-            }
-        }
+        console.log(chalk.red('❌ Document upload step reached, but no documents are configured.'));
+        return null;
     } else if (currentStep === 'success') {
         // Already verified, just get URL
         console.log(chalk.green('✅ Already verified! Getting google URL...'));
