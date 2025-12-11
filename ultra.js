@@ -406,6 +406,44 @@ async function smartClickContinue(page, browserId, attempts = 6) {
     }
 }
 
+async function waitForVisibleSelector(page, selectors, browserId, contextLabel, timeout = 15000) {
+    const start = Date.now();
+    let retriedContinue = false;
+
+    while (Date.now() - start < timeout) {
+        for (const frame of page.frames()) {
+            for (const selector of selectors) {
+                const handle = await frame.$(selector);
+                if (!handle) continue;
+
+                const isVisible = await frame.evaluate((el) => {
+                    const rect = el.getBoundingClientRect();
+                    const style = window.getComputedStyle(el);
+                    return rect.width > 0 &&
+                        rect.height > 0 &&
+                        style.visibility !== 'hidden' &&
+                        style.display !== 'none';
+                }, handle);
+
+                if (isVisible) {
+                    await frame.evaluate((el) => el.scrollIntoView({ behavior: 'instant', block: 'center' }), handle);
+                    return { frame, handle };
+                }
+            }
+        }
+
+        if (!retriedContinue && Date.now() - start > 4000) {
+            console.log(`[B-${browserId}] 🔄 Retrying continue to reach ${contextLabel} field...`);
+            await smartClickContinue(page, browserId, 2);
+            retriedContinue = true;
+        }
+
+        await fastDelay(300);
+    }
+
+    throw new Error(`${contextLabel} input not found after ${timeout}ms`);
+}
+
 // Detect Google throttling/blocking message during captcha solving
 async function checkCaptchaThrottling(page, browserId) {
     const frames = page.frames();
@@ -774,7 +812,7 @@ async function verifyStudentAccount(page, browserId, verificationUrl, email, pas
             const confirmationIndicators = [
                 'confirm your account', 'confirm', 'verification', 'bevestigen',
                 'student discount', 'verify', 'potvrdit', 'confirmer', 'bestätigen',
-                '确认', 'bevestig', 'confirma', 'confirmar', 'onayla', '確認'
+                '确认', 'bevestig', 'confirma', 'confirmar', 'onayla', '確認', '확인'
             ];
 
             return (url.includes('student') && url.includes('apply')) ||
@@ -1004,31 +1042,21 @@ async function signupOnly() {
 
         // Password step
         console.log(`[B-${browserId}] 🔐 Step 2: Password`);
-        await page.waitForSelector("input[data-testid='password'], #new-password, input[name='password'], input[type='password']", { timeout: 10000 });
-        
         const passwordSelectors = [
             "input[data-testid='password']",
+            "input[data-testid='new-password']",
             "#new-password",
-            "input[name='password']", 
-            "input[type='password']"
+            "#password",
+            "input[name='password']",
+            "input[type='password']",
+            "input[autocomplete='new-password']"
         ];
-        
-        let passwordFilled = false;
-        for (const selector of passwordSelectors) {
-            const passwordInput = await page.$(selector);
-            if (passwordInput) {
-                await passwordInput.click();
-                await fastDelay(200);
-                await passwordInput.type(config.password, { delay: 30 });
-                console.log(`[B-${browserId}] ✅ Password entered`);
-                passwordFilled = true;
-                break;
-            }
-        }
-        
-        if (!passwordFilled) {
-            throw new Error("Password input not found");
-        }
+
+        const passwordInput = await waitForVisibleSelector(page, passwordSelectors, browserId, 'password', 16000);
+        await passwordInput.handle.click();
+        await fastDelay(200);
+        await passwordInput.handle.type(config.password, { delay: 30 });
+        console.log(`[B-${browserId}] ✅ Password entered`);
 
         await fastDelay(1000);
         await smartClickContinue(page, browserId);
@@ -1336,31 +1364,21 @@ async function signupAndVerify() {
 
         // Password step
         console.log(`[B-${browserId}] 🔐 Step 2: Password`);
-        await page.waitForSelector("input[data-testid='password'], #new-password, input[name='password'], input[type='password']", { timeout: 10000 });
-        
         const passwordSelectors = [
             "input[data-testid='password']",
+            "input[data-testid='new-password']",
             "#new-password",
-            "input[name='password']", 
-            "input[type='password']"
+            "#password",
+            "input[name='password']",
+            "input[type='password']",
+            "input[autocomplete='new-password']"
         ];
-        
-        let passwordFilled = false;
-        for (const selector of passwordSelectors) {
-            const passwordInput = await page.$(selector);
-            if (passwordInput) {
-                await passwordInput.click();
-                await fastDelay(200);
-                await passwordInput.type(config.password, { delay: 30 });
-                console.log(`[B-${browserId}] ✅ Password entered`);
-                passwordFilled = true;
-                break;
-            }
-        }
-        
-        if (!passwordFilled) {
-            throw new Error("Password input not found");
-        }
+
+        const passwordInput = await waitForVisibleSelector(page, passwordSelectors, browserId, 'password', 16000);
+        await passwordInput.handle.click();
+        await fastDelay(200);
+        await passwordInput.handle.type(config.password, { delay: 30 });
+        console.log(`[B-${browserId}] ✅ Password entered`);
 
         await fastDelay(1000);
         await smartClickContinue(page, browserId);
