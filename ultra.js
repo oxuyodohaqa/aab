@@ -289,6 +289,35 @@ async function smartClickContinue(page, browserId, attempts = 6) {
     }
 }
 
+// Detect Google throttling/blocking message during captcha solving
+async function checkCaptchaThrottling(page, browserId) {
+    const frames = page.frames();
+    const throttlingIndicators = [
+        'try again later',
+        'automated queries'
+    ];
+
+    for (const frame of frames) {
+        try {
+            const text = await frame.evaluate(() => {
+                const body = document.body;
+                return body ? body.innerText.toLowerCase() : '';
+            });
+
+            const throttled = throttlingIndicators.every(indicator => text.includes(indicator));
+            if (throttled) {
+                console.log(`[B-${browserId}] 🛑 Captcha blocked with 'Try again later' message (frame ${frame.name() || 'recaptcha'})`);
+                return true;
+            }
+        } catch (e) {
+            // Ignore cross-origin frames that cannot be read
+            continue;
+        }
+    }
+
+    return false;
+}
+
 // ENHANCED BUSTER CAPTCHA SOLVER
 async function solveCaptchaWithBuster(page, browserId, attempt) {
     try {
@@ -412,11 +441,15 @@ async function solveCaptchaWithBuster(page, browserId, attempt) {
 // ENHANCED CAPTCHA HANDLER WITH MULTIPLE CONTINUE ATTEMPTS
 async function handleCaptchaWithBuster(page, browserId, maxRetries = 5) {
     let retryCount = 0;
-    
+
     while (retryCount < maxRetries) {
         try {
+            if (await checkCaptchaThrottling(page, browserId)) {
+                throw new Error('CAPTCHA_THROTTLED');
+            }
+
             console.log(`[B-${browserId}] 🤖 Captcha attempt ${retryCount + 1}/${maxRetries}`);
-            
+
             // Check if captcha is still present
             const captchaPresent = await page.evaluate(() => {
                 return document.querySelector('iframe[src*="recaptcha"]') !== null;
@@ -424,13 +457,13 @@ async function handleCaptchaWithBuster(page, browserId, maxRetries = 5) {
             
             if (!captchaPresent) {
                 console.log(`[B-${browserId}] ✅ No captcha detected`);
-                
+
                 // Try to click continue anyway
                 await smartClickContinue(page, browserId);
-                
+
                 return true;
             }
-            
+
             const captchaSolved = await solveCaptchaWithBuster(page, browserId, retryCount);
 
             if (captchaSolved) {
@@ -451,6 +484,8 @@ async function handleCaptchaWithBuster(page, browserId, maxRetries = 5) {
                     await smartClickContinue(page, browserId);
                     await fastDelay(800);
                 }
+            } else if (await checkCaptchaThrottling(page, browserId)) {
+                throw new Error('CAPTCHA_THROTTLED');
             }
 
             retryCount++;
@@ -461,6 +496,11 @@ async function handleCaptchaWithBuster(page, browserId, maxRetries = 5) {
             
         } catch (error) {
             console.log(`[B-${browserId}] ⚠️ Attempt ${retryCount + 1} error: ${error.message}`);
+
+            if (error.message === 'CAPTCHA_THROTTLED') {
+                throw error;
+            }
+
             retryCount++;
             await fastDelay(2000);
         }
@@ -479,12 +519,12 @@ async function verifyStudentAccount(page, browserId, verificationUrl, email, pas
         console.log(`[B-${browserId}] 🎓 Starting student verification process...`);
         console.log(`[B-${browserId}] 🔗 Verification URL: ${verificationUrl.substring(0, 60)}...`);
         
-        await page.goto(verificationUrl, { 
+        await page.goto(verificationUrl, {
             waitUntil: "domcontentloaded",
-            timeout: 30000 
+            timeout: 30000
         });
-        
-        await fastDelay(5000);
+
+        await fastDelay(1000);
         
 const isConfirmationPage = await page.evaluate(() => {
     const url = window.location.href;
@@ -927,7 +967,7 @@ async function signupOnly() {
             }
             
             captchaAttempts++;
-            await fastDelay(5000);
+            await fastDelay(1000);
         }
 
         // Wait for signup completion
@@ -971,7 +1011,12 @@ async function signupOnly() {
         }
 
     } catch (error) {
-        console.log(`[B-${browserId}] ❌ Error: ${error.message}`);
+        if (error.message === 'CAPTCHA_THROTTLED') {
+            console.log(`[B-${browserId}] 🛑 Captcha throttled - closing browser and moving to next task`);
+        } else {
+            console.log(`[B-${browserId}] ❌ Error: ${error.message}`);
+        }
+
         return false;
     } finally {
         try {
@@ -1268,7 +1313,7 @@ async function signupAndVerify() {
             }
             
             captchaAttempts++;
-            await fastDelay(5000);
+            await fastDelay(1000);
         }
 
         // Wait for signup completion
@@ -1326,11 +1371,15 @@ async function signupAndVerify() {
         }
 
     } catch (error) {
-        console.log(`[B-${browserId}] ❌ Error: ${error.message}`);
-        
+        if (error.message === 'CAPTCHA_THROTTLED') {
+            console.log(`[B-${browserId}] 🛑 Captcha throttled - closing browser and continuing with next account`);
+        } else {
+            console.log(`[B-${browserId}] ❌ Error: ${error.message}`);
+        }
+
         // ✅ Return link to pool on error
         returnLinkToPool(browserId, spotifyLink);
-        
+
         return false; // ❌ Link returned to pool
     } finally {
         try {
@@ -1501,9 +1550,7 @@ async function main() {
         
         batchCounter++;
         
-        const waitTime = 5000;
-        console.log(`\n⏳ Next batch in ${waitTime/1000}s...`);
-        await delay(waitTime);
+        console.log(`\n⏩ Starting next batch immediately...`);
     }
     
     console.log(`\n🏁 === FINAL RESULTS ===`);
