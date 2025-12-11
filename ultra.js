@@ -26,8 +26,6 @@ function generateEmail() {
 // CAPTCHA DELAY - Only for Buster operations
 const captchaDelay = (ms) => new Promise(resolve => setTimeout(resolve, ms));
 
-// Global browser counter for positioning
-let browserCounter = 0;
 let totalSuccessful = 0;
 let totalAttempts = 0;
 
@@ -147,19 +145,66 @@ async function updateLinksFile() {
     }
 }
 
+async function pageHasAutomatedQueryBlock(page) {
+    try {
+        const frames = page.frames();
+
+        for (const frame of frames) {
+            try {
+                const text = await frame.evaluate(() => document.body.textContent.toLowerCase());
+                if (
+                    text.includes('your computer or network may be sending automated queries') ||
+                    text.includes('try again later')
+                ) {
+                    return true;
+                }
+            } catch (error) {
+                continue;
+            }
+        }
+
+        return false;
+    } catch (error) {
+        return false;
+    }
+}
+
+async function assertNotAutomationBlocked(page, browserId, context) {
+    const automationBlocked = await pageHasAutomatedQueryBlock(page);
+    if (automationBlocked) {
+        console.log(`[B-${browserId}] ⛔ Automated query block detected during ${context} - restarting browser`);
+        throw new Error('Automated query block page');
+    }
+}
+
+async function saveUnverifiedAccount(browserId, email, password, page, reason) {
+    if (page) {
+        const automationBlocked = await pageHasAutomatedQueryBlock(page);
+        if (automationBlocked) {
+            console.log(`[B-${browserId}] ⏩ Skipping unverified save (automated query block detected)`);
+            return;
+        }
+    }
+
+    const unverifiedData = `${email}:${password}\n`;
+    await fs.appendFile('unverified.txt', unverifiedData);
+    console.log(`[B-${browserId}] 💾 Account saved to unverified.txt (${reason})`);
+}
+
 // Calculate window position
 function getWindowPosition(browserId) {
-    const windowWidth = 370;
-    const windowHeight = 950;
-    const margin = 5;
+    const windowWidth = 320;
+    const windowHeight = 520;
+    const margin = 10;
+    const rowSpacing = windowHeight + 40;
     const browsersPerRow = Math.floor(1920 / (windowWidth + margin));
-    
+
     const row = Math.floor((browserId - 1) / browsersPerRow);
     const col = (browserId - 1) % browsersPerRow;
-    
+
     return {
         x: col * (windowWidth + margin),
-        y: row * (windowHeight + 50)
+        y: row * rowSpacing
     };
 }
 
@@ -412,11 +457,12 @@ async function solveCaptchaWithBuster(page, browserId, attempt) {
 // ENHANCED CAPTCHA HANDLER WITH MULTIPLE CONTINUE ATTEMPTS
 async function handleCaptchaWithBuster(page, browserId, maxRetries = 5) {
     let retryCount = 0;
-    
+
     while (retryCount < maxRetries) {
         try {
+            await assertNotAutomationBlocked(page, browserId, 'captcha handling');
             console.log(`[B-${browserId}] 🤖 Captcha attempt ${retryCount + 1}/${maxRetries}`);
-            
+
             // Check if captcha is still present
             const captchaPresent = await page.evaluate(() => {
                 return document.querySelector('iframe[src*="recaptcha"]') !== null;
@@ -453,6 +499,8 @@ async function handleCaptchaWithBuster(page, browserId, maxRetries = 5) {
                 }
             }
 
+            await assertNotAutomationBlocked(page, browserId, 'captcha handling');
+
             retryCount++;
             if (retryCount < maxRetries) {
                 console.log(`[B-${browserId}] ⏳ Retry ${retryCount + 1} in 1.5 seconds...`);
@@ -479,11 +527,13 @@ async function verifyStudentAccount(page, browserId, verificationUrl, email, pas
         console.log(`[B-${browserId}] 🎓 Starting student verification process...`);
         console.log(`[B-${browserId}] 🔗 Verification URL: ${verificationUrl.substring(0, 60)}...`);
         
-        await page.goto(verificationUrl, { 
+        await page.goto(verificationUrl, {
             waitUntil: "domcontentloaded",
-            timeout: 30000 
+            timeout: 30000
         });
-        
+
+        await assertNotAutomationBlocked(page, browserId, 'verification page load');
+
         await fastDelay(5000);
         
 const isConfirmationPage = await page.evaluate(() => {
@@ -504,11 +554,8 @@ const isConfirmationPage = await page.evaluate(() => {
         if (!isConfirmationPage) {
             console.log(`[B-${browserId}] ❌ NOT a confirmation page - verification FAILED`);
             
-            // Save to unverified file
-            const unverifiedData = `${email}:${password}\n`;
-            await fs.appendFile('unverified.txt', unverifiedData);
-            console.log(`[B-${browserId}] 💾 Account saved to unverified.txt (wrong page)`);
-            
+            await saveUnverifiedAccount(browserId, email, password, page, 'wrong page');
+
             return false; // ❌ FAIL - not confirmation page
         }
         
@@ -574,11 +621,8 @@ if (confirmTexts.some(confirmText => text === confirmText || text.includes(confi
         if (!confirmClicked) {
             console.log(`[B-${browserId}] ❌ Button click FAILED - verification FAILED`);
             
-            // Save to unverified file
-            const unverifiedData = `${email}:${password}\n`;
-            await fs.appendFile('unverified.txt', unverifiedData);
-            console.log(`[B-${browserId}] 💾 Account saved to unverified.txt (button not clicked)`);
-            
+            await saveUnverifiedAccount(browserId, email, password, page, 'button not clicked');
+
             return false; // ❌ FAIL - button not clicked
         }
         
@@ -619,26 +663,16 @@ await page.waitForFunction(() => {
         } catch (timeoutError) {
             console.log(`[B-${browserId}] ❌ Verification timeout - verification FAILED`);
             
-            // Save to unverified file
-            const unverifiedData = `${email}:${password}\n`;
-            await fs.appendFile('unverified.txt', unverifiedData);
-            console.log(`[B-${browserId}] 💾 Account saved to unverified.txt (timeout)`);
-            
+            await saveUnverifiedAccount(browserId, email, password, page, 'timeout');
+
             return false; // ❌ FAIL - timeout
         }
         
     } catch (error) {
         console.log(`[B-${browserId}] ❌ Verification error: ${error.message}`);
         
-        // Save to unverified file
-        try {
-            const errorData = `${email}:${password}\n`;
-            await fs.appendFile('unverified.txt', errorData);
-            console.log(`[B-${browserId}] 💾 Account saved to unverified.txt (error)`);
-        } catch (saveError) {
-            console.log(`[B-${browserId}] ❌ Save failed: ${saveError.message}`);
-        }
-        
+        await saveUnverifiedAccount(browserId, email, password, page, 'error');
+
         return false; // ❌ FAIL - error occurred
     }
 }
@@ -652,20 +686,17 @@ async function clearAndType(page, element, text) {
     await element.type(text, { delay: 30 });
 }
 
-// SIGNUP ONLY FUNCTION - Saves to spotify.txt
-async function signupOnly() {
+async function launchBrowser(browserId) {
     const extensionPath = path.join(__dirname, 'buster');
     const extensionExists = fsSync.existsSync(extensionPath);
-    
+
     if (!extensionExists) {
         throw new Error('Buster extension not found at ./buster/');
     }
-    
-    browserCounter++;
-    const browserId = browserCounter;
+
     const windowPos = getWindowPosition(browserId);
-    
-    const browser = await puppeteer.launch({
+
+    return puppeteer.launch({
         headless: false,
         args: [
             "--no-sandbox",
@@ -679,12 +710,16 @@ async function signupOnly() {
             "--disable-popup-blocking",
             `--disable-extensions-except=${extensionPath}`,
             `--load-extension=${extensionPath}`,
-            `--window-size=370,950`,
+            `--window-size=320,520`,
             `--window-position=${windowPos.x},${windowPos.y}`
         ],
-        defaultViewport: { width: 370, height: 950 }
+        defaultViewport: { width: 320, height: 520 }
     });
-    
+}
+
+// SIGNUP ONLY FUNCTION - Saves to spotify.txt
+async function signupOnly(browser, browserId) {
+    let page;
     try {
         const email = generateEmail();
         const firstName = faker.person.firstName();
@@ -693,7 +728,7 @@ async function signupOnly() {
         
         console.log(`[B-${browserId}] 🚀 SIGNUP ONLY: ${email}`);
         
-        const page = await browser.newPage();
+        page = await browser.newPage();
         
         const userAgent = getRandomUserAgent();
         await page.setUserAgent(userAgent);
@@ -703,13 +738,15 @@ async function signupOnly() {
         }, browserId);
         
         await blockAllCookies(page, browserId);
-        
+
         console.log(`[B-${browserId}] 📱 Loading signup...`);
-        await page.goto('https://www.spotify.com/signup', { 
+        await page.goto('https://www.spotify.com/signup', {
             waitUntil: "domcontentloaded",
-            timeout: 20000 
+            timeout: 20000
         });
-        
+
+        await assertNotAutomationBlocked(page, browserId, 'signup page load');
+
         await fastDelay(2000);
 
         // Email step
@@ -974,57 +1011,29 @@ async function signupOnly() {
         console.log(`[B-${browserId}] ❌ Error: ${error.message}`);
         return false;
     } finally {
-        try {
-            await browser.close();
-        } catch (e) {}
+        if (page) {
+            try {
+                await page.close();
+            } catch (e) {}
+        }
     }
 }
 
 // ✅ SIGNUP AND VERIFY FUNCTION - EACH ACCOUNT GETS UNIQUE LINK
-async function signupAndVerify() {
-    const extensionPath = path.join(__dirname, 'buster');
-    const extensionExists = fsSync.existsSync(extensionPath);
-    
-    if (!extensionExists) {
-        throw new Error('Buster extension not found at ./buster/');
-    }
-    
+async function signupAndVerify(browser, browserId) {
+    let page;
+
     // ✅ GET UNIQUE LINK (immediately removed from pool)
     const spotifyLink = getNextLink();
-    
+
     if (!spotifyLink) {
         console.log("❌ No verification links available!");
         return false;
     }
-    
-    browserCounter++;
-    const browserId = browserCounter;
-    
+
     // ✅ Assign link to this specific browser
     assignLinkToBrowser(browserId, spotifyLink);
-    
-    const windowPos = getWindowPosition(browserId);
-    
-    const browser = await puppeteer.launch({
-        headless: false,
-        args: [
-            "--no-sandbox",
-            "--disable-setuid-sandbox",
-            "--disable-web-security",
-            "--disable-features=VizDisplayCompositor",
-            "--disable-blink-features=AutomationControlled",
-            "--disable-dev-shm-usage",
-            "--no-first-run",
-            "--disable-default-apps",
-            "--disable-popup-blocking",
-            `--disable-extensions-except=${extensionPath}`,
-            `--load-extension=${extensionPath}`,
-            `--window-size=370,950`,
-            `--window-position=${windowPos.x},${windowPos.y}`
-        ],
-        defaultViewport: { width: 370, height: 950 }
-    });
-    
+
     try {
         const email = generateEmail();
         const firstName = faker.person.firstName();
@@ -1034,7 +1043,7 @@ async function signupAndVerify() {
         console.log(`[B-${browserId}] 🚀 SIGNUP + VERIFY: ${email}`);
         console.log(`[B-${browserId}] 🔗 Unique link assigned`);
         
-        const page = await browser.newPage();
+        page = await browser.newPage();
         
         const userAgent = getRandomUserAgent();
         await page.setUserAgent(userAgent);
@@ -1046,11 +1055,13 @@ async function signupAndVerify() {
         await blockAllCookies(page, browserId);
         
         console.log(`[B-${browserId}] 📱 Loading signup...`);
-        await page.goto('https://www.spotify.com/signup', { 
+        await page.goto('https://www.spotify.com/signup', {
             waitUntil: "domcontentloaded",
-            timeout: 20000 
+            timeout: 20000
         });
-        
+
+        await assertNotAutomationBlocked(page, browserId, 'signup page load');
+
         await fastDelay(2000);
 
         // Email step
@@ -1330,12 +1341,14 @@ async function signupAndVerify() {
         
         // ✅ Return link to pool on error
         returnLinkToPool(browserId, spotifyLink);
-        
+
         return false; // ❌ Link returned to pool
     } finally {
-        try {
-            await browser.close();
-        } catch (e) {}
+        if (page) {
+            try {
+                await page.close();
+            } catch (e) {}
+        }
     }
 }
 
@@ -1427,88 +1440,66 @@ async function main() {
         return;
     }
     
-    let batchCounter = 1;
-    
     console.log(`🎯 Starting with ${userBrowserCount} parallel browsers...\n`);
     console.log(`🎯 Mode: ${userMode === 1 ? 'SIGNUP ONLY' : 'SIGNUP + STRICT VERIFY'}`);
     console.log(`💾 Saving to: ${userMode === 1 ? 'spotify.txt' : 'verifiedstudent.txt + unverified.txt'}\n`);
-    
-    while (totalSuccessful < userAccountTarget && (userMode === 1 || availableLinks.length > 0)) {
-        console.log(`🚀 === BATCH #${batchCounter} ===`);
-        console.log(`⏰ Started: ${new Date().toLocaleTimeString()}`);
-        console.log(`🎯 Progress: ${totalSuccessful}/${userAccountTarget} verified accounts`);
-        if (userMode === 2) {
-            console.log(`📋 Links in pool: ${availableLinks.length}`);
-            console.log(`🔄 Links used successfully: ${usedLinks.length}`);
-            console.log(`⚙️ Links currently assigned: ${assignedLinks.size}`);
-        }
-        
-        browserCounter = 0;
-        
-        const remainingAccounts = userAccountTarget - totalSuccessful;
-        let browsersThisBatch = Math.min(userBrowserCount, remainingAccounts);
-        
-        if (userMode === 2) {
-            browsersThisBatch = Math.min(browsersThisBatch, availableLinks.length);
-        }
-        
-        if (browsersThisBatch <= 0) {
-            console.log("🏁 No more accounts needed or links available!");
-            break;
-        }
-        
-        const promises = Array(browsersThisBatch).fill().map((_, i) => 
-            delay(i * 1000).then(async () => {
-                return userMode === 1 ? await signupOnly() : await signupAndVerify();
-            })
-        );
 
-        const results = await Promise.allSettled(promises);
-        const successful = results.filter(r => r.status === 'fulfilled' && r.value === true).length;
-        const failed = results.length - successful;
-        
-        totalSuccessful += successful;
-        totalAttempts += results.length;
-        
-        console.log(`\n📊 === BATCH #${batchCounter} RESULTS ===`);
-        console.log(`✅ Success: ${successful}/${results.length}`);
-        console.log(`❌ Failed: ${failed}/${results.length}`);
-        console.log(`📈 Total: ${totalSuccessful}/${totalAttempts} (${((totalSuccessful/totalAttempts)*100).toFixed(1)}%)`);
-        console.log(`🎯 Progress: ${totalSuccessful}/${userAccountTarget} verified accounts`);
-        if (userMode === 2) {
-            console.log(`📋 Links in pool: ${availableLinks.length}`);
-            console.log(`🔄 Links used successfully: ${usedLinks.length}`);
-        }
-        console.log(`💾 Check ${userMode === 1 ? 'spotify.txt' : 'verifiedstudent.txt'} for verified accounts`);
-        if (userMode === 2) {
-            console.log(`⚠️ Check unverified.txt for failed verifications`);
-        }
-        
-        if (userMode === 2) {
-            await updateLinksFile();
-        }
-        
-        if (totalSuccessful >= userAccountTarget) {
-            console.log(`\n🎉 TARGET REACHED! Created ${totalSuccessful}/${userAccountTarget} verified accounts!`);
-            break;
-        }
-        
-        if (userMode === 2 && availableLinks.length === 0) {
-            console.log(`\n📝 No more links available. Created ${totalSuccessful} verified accounts.`);
-            console.log(`⚠️ Check unverified.txt for accounts that need manual verification`);
-            break;
-        }
-        
-        batchCounter++;
-        
-        const waitTime = 5000;
-        console.log(`\n⏳ Next batch in ${waitTime/1000}s...`);
-        await delay(waitTime);
+    const workerCount = userMode === 1
+        ? userBrowserCount
+        : Math.min(userBrowserCount, availableLinks.length);
+
+    if (workerCount <= 0) {
+        console.log("🏁 No available workers to start!");
+        return;
     }
-    
+
+    const worker = async (workerId) => {
+        while (totalSuccessful < userAccountTarget && (userMode === 1 || availableLinks.length > 0)) {
+            let browser;
+
+            try {
+                browser = await launchBrowser(workerId);
+
+                const result = userMode === 1
+                    ? await signupOnly(browser, workerId)
+                    : await signupAndVerify(browser, workerId);
+
+                totalAttempts++;
+
+                if (result) {
+                    totalSuccessful++;
+                    console.log(`🎯 Progress: ${totalSuccessful}/${userAccountTarget} verified accounts`);
+                }
+
+                if (userMode === 2 && availableLinks.length === 0) {
+                    console.log(`📝 Worker #${workerId} stopping - no more links.`);
+                    break;
+                }
+            } catch (iterationError) {
+                console.log(`[B-${workerId}] ⚠️ Worker iteration error: ${iterationError.message}`);
+                await fastDelay(500);
+            } finally {
+                if (browser) {
+                    try {
+                        await browser.close();
+                    } catch (e) {}
+                }
+            }
+        }
+    };
+
+    const workers = Array(workerCount).fill().map((_, index) => worker(index + 1));
+    await Promise.all(workers);
+
+    if (userMode === 2) {
+        await updateLinksFile();
+    }
+
+    const successRate = totalAttempts === 0 ? 0 : ((totalSuccessful / totalAttempts) * 100);
+
     console.log(`\n🏁 === FINAL RESULTS ===`);
     console.log(`✅ Verified accounts: ${totalSuccessful}/${userAccountTarget}`);
-    console.log(`📊 Success rate: ${((totalSuccessful/totalAttempts)*100).toFixed(1)}%`);
+    console.log(`📊 Success rate: ${successRate.toFixed(1)}%`);
     if (userMode === 2) {
         console.log(`📋 Links used successfully: ${usedLinks.length}`);
         console.log(`📋 Links remaining in pool: ${availableLinks.length}`);
