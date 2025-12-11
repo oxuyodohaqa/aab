@@ -1501,9 +1501,7 @@ async function main() {
         
         batchCounter++;
         
-        const waitTime = 5000;
-        console.log(`\n⏳ Next batch in ${waitTime/1000}s...`);
-        await delay(waitTime);
+        console.log(`\n⏩ Starting next batch immediately...`);
     }
     
     console.log(`\n🏁 === FINAL RESULTS ===`);
