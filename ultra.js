@@ -1,13 +1,23 @@
+import { createRequire } from 'module';
+import { fileURLToPath } from 'url';
+
+const require = createRequire(import.meta.url);
+const path = require('path');
+const __filename = fileURLToPath(import.meta.url);
+const __dirname = path.dirname(__filename);
+
 const puppeteer = require('puppeteer-extra');
 const StealthPlugin = require('puppeteer-extra-plugin-stealth');
 const fs = require('fs').promises;
 const fsSync = require('fs');
-const path = require('path');
 const readline = require('readline');
 const config = require('./config.json');
 const delay = (ms) => new Promise(resolve => setTimeout(resolve, ms));
 const fastDelay = (ms = 50) => new Promise(resolve => setTimeout(resolve, ms));
 const { faker } = require('@faker-js/faker');
+
+// Always skip saving failed accounts regardless of config
+const shouldSaveFailedAccounts = false;
 
 puppeteer.use(StealthPlugin());
 
@@ -32,7 +42,8 @@ let totalSuccessful = 0;
 let totalAttempts = 0;
 const activeBrowsers = new Map();
 
-const baseViewport = { width: 370, height: 950 };
+// Smaller viewport to tile many visible browser windows (e.g., 2 rows of 5 on 1080p)
+const baseViewport = { width: 370, height: 480 };
 
 function buildViewport(browserId) {
     const widthJitter = Math.floor(Math.random() * 20); // 0-19
@@ -182,14 +193,15 @@ function getWindowPosition(browserId) {
     const windowWidth = baseViewport.width;
     const windowHeight = baseViewport.height;
     const margin = 5;
+    const verticalSpacing = 20; // tighter spacing keeps multiple rows on-screen
     const browsersPerRow = Math.floor(1920 / (windowWidth + margin));
-    
+
     const row = Math.floor((browserId - 1) / browsersPerRow);
     const col = (browserId - 1) % browsersPerRow;
-    
+
     return {
         x: col * (windowWidth + margin),
-        y: row * (windowHeight + 50)
+        y: row * (windowHeight + verticalSpacing)
     };
 }
 
@@ -821,12 +833,9 @@ async function verifyStudentAccount(page, browserId, verificationUrl, email, pas
         
         if (!isConfirmationPage) {
             console.log(`[B-${browserId}] ❌ NOT a confirmation page - verification FAILED`);
-            
-            // Save to unverified file
-            const unverifiedData = `${email}:${password}\n`;
-            await fs.appendFile('unverified.txt', unverifiedData);
-            console.log(`[B-${browserId}] 💾 Account saved to unverified.txt (wrong page)`);
-            
+
+            await saveAccountToFile('unverified.txt', email, password, 'wrong page', browserId);
+
             return false; // ❌ FAIL - not confirmation page
         }
         
@@ -869,10 +878,7 @@ async function verifyStudentAccount(page, browserId, verificationUrl, email, pas
             if (!genericClicked) {
                 console.log(`[B-${browserId}] ❌ No clickable buttons found - verification FAILED`);
 
-                // Save to unverified file
-                const unverifiedData = `${email}:${password}\n`;
-                await fs.appendFile('unverified.txt', unverifiedData);
-                console.log(`[B-${browserId}] 💾 Account saved to unverified.txt (button not clicked)`);
+                await saveAccountToFile('unverified.txt', email, password, 'button not clicked', browserId);
 
                 return false; // ❌ FAIL - button not clicked
             }
@@ -916,27 +922,17 @@ async function verifyStudentAccount(page, browserId, verificationUrl, email, pas
             
         } catch (timeoutError) {
             console.log(`[B-${browserId}] ❌ Verification timeout - verification FAILED`);
-            
-            // Save to unverified file
-            const unverifiedData = `${email}:${password}\n`;
-            await fs.appendFile('unverified.txt', unverifiedData);
-            console.log(`[B-${browserId}] 💾 Account saved to unverified.txt (timeout)`);
-            
+
+            await saveAccountToFile('unverified.txt', email, password, 'timeout', browserId);
+
             return false; // ❌ FAIL - timeout
         }
-        
+
     } catch (error) {
         console.log(`[B-${browserId}] ❌ Verification error: ${error.message}`);
-        
-        // Save to unverified file
-        try {
-            const errorData = `${email}:${password}\n`;
-            await fs.appendFile('unverified.txt', errorData);
-            console.log(`[B-${browserId}] 💾 Account saved to unverified.txt (error)`);
-        } catch (saveError) {
-            console.log(`[B-${browserId}] ❌ Save failed: ${saveError.message}`);
-        }
-        
+
+        await saveAccountToFile('unverified.txt', email, password, 'error', browserId);
+
         return false; // ❌ FAIL - error occurred
     }
 }
@@ -952,6 +948,11 @@ async function clearAndType(page, element, text) {
 
 async function saveAccountToFile(fileName, email, password, reason, browserId) {
     if (!email || !password) return;
+
+    if (!shouldSaveFailedAccounts) {
+        console.log(`[B-${browserId}] 💾 Skipping save to ${fileName}${reason ? ` (${reason})` : ''} (failed account saving disabled)`);
+        return;
+    }
 
     const accountData = `${email}:${password}\n`;
 
