@@ -10,7 +10,10 @@ const CONFIG = {
     studentsFile: process.env.STUDENTS_FILE || 'students.txt',
     receiptsDir: process.env.RECEIPTS_DIR || 'receipts',
     collegesFile: process.env.COLLEGES_FILE,
-    outputFile: process.env.OUTPUT_FILE || 'sukses.txt'
+    outputFile: process.env.OUTPUT_FILE || 'sukses.txt',
+    defaultBirthDate: process.env.DEFAULT_BIRTHDATE || '1991-01-01',
+    defaultStatus: process.env.DEFAULT_STATUS || 'fulltime',
+    defaultMajor: process.env.DEFAULT_MAJOR || 'accounting'
 };
 
 if (!CONFIG.collegesFile) {
@@ -41,16 +44,38 @@ function loadStudents() {
                 const parts = line.split('|').map(s => s.trim());
                 if (parts.length < 4) return null;
 
-                const [school, firstNameRaw, lastNameRaw, emailRaw] = parts;
+                const [school, firstNameRaw, lastNameRaw, emailRaw, birthDateRaw, metadataRaw, ...rest] = parts;
                 const firstName = firstNameRaw || 'TEST';
                 const lastName = lastNameRaw || 'USER';
-                const email = emailRaw || `${firstName.toLowerCase()}.${lastName.toLowerCase()}@example.com`;
+                const email = (emailRaw || `${firstName.toLowerCase()}.${lastName.toLowerCase()}@example.com`).toLowerCase();
+                const birthDate = birthDateRaw || CONFIG.defaultBirthDate;
+
+                let metadata = {};
+
+                if (metadataRaw) {
+                    try {
+                        metadata = JSON.parse(metadataRaw);
+                    } catch (err) {
+                        // Backward compatibility with status/major columns
+                        metadata = {
+                            status: metadataRaw || CONFIG.defaultStatus,
+                            major: rest[0] || CONFIG.defaultMajor
+                        };
+                    }
+                } else {
+                    metadata = {
+                        status: CONFIG.defaultStatus,
+                        major: CONFIG.defaultMajor
+                    };
+                }
 
                 return {
                     school,
-                    firstName: firstName.toUpperCase(),
-                    lastName: lastName.toUpperCase(),
-                    email: email.toLowerCase()
+                    firstName,
+                    lastName,
+                    email,
+                    birthDate,
+                    metadata
                 };
             })
             .filter(s => s);
@@ -131,21 +156,16 @@ async function getVerificationDetails(verificationId) {
 // ACTUALLY SUBMIT PERSONAL INFO WITH VERIFICATION ID
 async function submitPersonalInfo(verificationId, student, college) {
     try {
-        const dob = {
-            year: new Date().getFullYear() - Math.floor(Math.random() * 8) - 18,
-            month: Math.floor(Math.random() * 12) + 1,
-            day: Math.floor(Math.random() * 28) + 1
-        };
-        
         const data = {
             firstName: student.firstName,
             lastName: student.lastName,
-            birthDate: `${dob.year}-${dob.month.toString().padStart(2, '0')}-${dob.day.toString().padStart(2, '0')}`,
+            birthDate: student.birthDate,
             email: student.email,
             organization: {
                 id: college.id,
                 name: college.name
-            }
+            },
+            metadata: student.metadata || {}
         };
         
         console.log(chalk.yellow('📝 Actually submitting personal info to SheerID...'));
